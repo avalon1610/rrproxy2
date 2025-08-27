@@ -1,0 +1,16 @@
+[package]
+name = "rrproxy2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.99"
+clap = { version = "4.5.46", features = ["derive"] }
+rcgen = { version = "0.14.3", features = ["x509-parser"] }
+time = "0.3.41"
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+
+[dependencies.misc]
+git = "http://172.29.3.68:3000/raven/misc.git"
+features = ["tracing_logger"]
