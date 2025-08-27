@@ -187,6 +187,7 @@ impl Default for CertConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::process::Command;
     use tempfile::tempdir;
 
@@ -331,6 +332,191 @@ mod tests {
         println!("Both certificates have matching subjects and are valid CAs");
     }
 
+    #[tokio::test]
+    async fn test_generate_srv_pem_matches_openssl() {
+        // Load the existing CA certificate and key from the tests folder
+        let ca_cert_path = PathBuf::from("./tests/cert.ca.pem");
+        let ca_key_path = PathBuf::from("./tests/key.ca.pem");
+
+        // Initialize CertManager with the existing CA
+        let cert_manager = CertManager::new(ca_cert_path, ca_key_path, PathBuf::from("/tmp/cache")).await.unwrap();
+
+        let common_name = "localhost";
+
+        // Generate server cert/key using our function
+        let (cert_pem, key_pem) = cert_manager.generate_srv_pem(common_name).await.unwrap();
+
+        // Create temporary directory for OpenSSL generated files
+        let temp_dir = tempdir().unwrap();
+        let openssl_cert_path = temp_dir.path().join("openssl_srv.crt");
+        let openssl_key_path = temp_dir.path().join("openssl_srv.key");
+        let openssl_csr_path = temp_dir.path().join("openssl_srv.csr");
+
+        // Copy the CA files to the temp directory for OpenSSL commands
+        let ca_cert_temp = temp_dir.path().join("ca.crt");
+        let ca_key_temp = temp_dir.path().join("ca.key");
+        std::fs::copy("./tests/cert.ca.pem", &ca_cert_temp).unwrap();
+        std::fs::copy("./tests/key.ca.pem", &ca_key_temp).unwrap();
+
+        // Generate server private key using OpenSSL
+        let openssl_key_result = Command::new("openssl")
+            .args([
+                "genrsa",
+                "-out",
+                openssl_key_path.to_str().unwrap(),
+                "2048",
+            ])
+            .output()
+            .expect("Failed to execute openssl genrsa command");
+
+        if !openssl_key_result.status.success() {
+            panic!(
+                "OpenSSL genrsa command failed: {}",
+                String::from_utf8_lossy(&openssl_key_result.stderr)
+            );
+        }
+
+        // Generate CSR using OpenSSL
+        let openssl_csr_result = Command::new("openssl")
+            .args([
+                "req",
+                "-new",
+                "-key",
+                openssl_key_path.to_str().unwrap(),
+                "-out",
+                openssl_csr_path.to_str().unwrap(),
+                "-subj",
+                &format!(
+                    "/CN={}/O={}/C=CN/ST=ZJ/L=HZ/OU=Dev",
+                    common_name,
+                    env!("CARGO_PKG_NAME")
+                ),
+            ])
+            .output()
+            .expect("Failed to execute openssl req command");
+
+        if !openssl_csr_result.status.success() {
+            panic!(
+                "OpenSSL req command failed: {}",
+                String::from_utf8_lossy(&openssl_csr_result.stderr)
+            );
+        }
+
+        // Create an extension file for key usage
+        let ext_file_path = temp_dir.path().join("extensions.cnf");
+        let ext_content = "basicConstraints = CA:false\nkeyUsage = critical,digitalSignature,keyEncipherment\n";
+        std::fs::write(&ext_file_path, ext_content).unwrap();
+
+        // Sign the CSR with the CA to generate server certificate using OpenSSL
+        let openssl_cert_result = Command::new("openssl")
+            .args([
+                "x509",
+                "-req",
+                "-in",
+                openssl_csr_path.to_str().unwrap(),
+                "-CA",
+                ca_cert_temp.to_str().unwrap(),
+                "-CAkey",
+                ca_key_temp.to_str().unwrap(),
+                "-CAcreateserial",
+                "-out",
+                openssl_cert_path.to_str().unwrap(),
+                "-days",
+                "365",
+                "-extfile",
+                ext_file_path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("Failed to execute openssl x509 command");
+
+        if !openssl_cert_result.status.success() {
+            panic!(
+                "OpenSSL x509 command failed: {}",
+                String::from_utf8_lossy(&openssl_cert_result.stderr)
+            );
+        }
+
+        // Read OpenSSL generated files
+        let openssl_cert = std::fs::read_to_string(&openssl_cert_path).unwrap();
+        let openssl_key = std::fs::read_to_string(&openssl_key_path).unwrap();
+
+        // Print certificate information for debugging
+        println!("=== Generated Server Certificate Details ===");
+        println!(
+            "Generated Subject: {}",
+            extract_field_from_pem(&cert_pem, "subject")
+        );
+        println!(
+            "Generated Issuer: {}",
+            extract_field_from_pem(&cert_pem, "issuer")
+        );
+        println!(
+            "Generated Validity: {}",
+            extract_field_from_pem(&cert_pem, "dates")
+        );
+        println!(
+            "Generated Key Usage: {}",
+            extract_field_from_pem(&cert_pem, "key_usage")
+        );
+
+        println!("\n=== OpenSSL Server Certificate Details ===");
+        println!(
+            "OpenSSL Subject: {}",
+            extract_field_from_pem(&openssl_cert, "subject")
+        );
+        println!(
+            "OpenSSL Issuer: {}",
+            extract_field_from_pem(&openssl_cert, "issuer")
+        );
+        println!(
+            "OpenSSL Validity: {}",
+            extract_field_from_pem(&openssl_cert, "dates")
+        );
+        println!(
+            "OpenSSL Key Usage: {}",
+            extract_field_from_pem(&openssl_cert, "key_usage")
+        );
+
+        // Extract and compare certificate information
+        // Compare subject information
+        let cert_subject = extract_field_from_pem(&cert_pem, "subject");
+        let openssl_cert_subject = extract_field_from_pem(&openssl_cert, "subject");
+        assert_eq!(
+            cert_subject, openssl_cert_subject,
+            "Subject fields should match"
+        );
+
+        // Compare issuer information
+        let cert_issuer = extract_field_from_pem(&cert_pem, "issuer");
+        let openssl_cert_issuer = extract_field_from_pem(&openssl_cert, "issuer");
+        assert_eq!(
+            cert_issuer, openssl_cert_issuer,
+            "Issuer fields should match"
+        );
+
+        // Both should have private key in PKCS#8 format
+        assert!(
+            cert_pem.contains("CERTIFICATE"),
+            "Generated cert should contain CERTIFICATE"
+        );
+        assert!(
+            openssl_cert.contains("CERTIFICATE"),
+            "OpenSSL cert should contain CERTIFICATE"
+        );
+
+        assert!(
+            key_pem.contains("PRIVATE KEY"),
+            "Generated key should be in PRIVATE KEY format"
+        );
+        assert!(
+            openssl_key.contains("PRIVATE KEY"),
+            "OpenSSL key should be in PRIVATE KEY format"
+        );
+
+        println!("\n=== Test Passed ===");
+        println!("Both server certificates have matching subjects and issuers");
+    }
+
     fn extract_field_from_pem(pem: &str, field: &str) -> String {
         let temp_dir = tempdir().unwrap();
         let cert_path = temp_dir.path().join("cert.pem");
@@ -436,6 +622,43 @@ mod tests {
                     }
                 }
                 "Basic Constraints not found".to_string()
+            }
+            "key_usage" => {
+                let output = Command::new("openssl")
+                    .args([
+                        "x509",
+                        "-in",
+                        cert_path.to_str().unwrap(),
+                        "-noout",
+                        "-text",
+                    ])
+                    .output()
+                    .expect("Failed to execute openssl x509 command");
+
+                if !output.status.success() {
+                    panic!(
+                        "OpenSSL x509 command failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                // Extract Key Usage from the full text output
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines() {
+                    if line.contains("Key Usage") {
+                        // Also get the next line which contains the value
+                        let lines: Vec<&str> = output_str.lines().collect();
+                        let line_idx = lines
+                            .iter()
+                            .position(|&l| l.contains("Key Usage"))
+                            .unwrap();
+                        if line_idx + 1 < lines.len() {
+                            return format!("{}{}", line.trim(), lines[line_idx + 1].trim());
+                        }
+                        return line.trim().to_string();
+                    }
+                }
+                "Key Usage not found".to_string()
             }
             "full_text" => {
                 let output = Command::new("openssl")
