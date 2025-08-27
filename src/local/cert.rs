@@ -149,6 +149,7 @@ impl From<CertConfig> for DistinguishedName {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct CertConfig {
     /// common name for the certificate (typically for the domain)
     pub common_name: String,
@@ -179,6 +180,285 @@ impl Default for CertConfig {
             city: "HZ".to_string(),
             org_unit: "Dev".to_string(),
             validity_days: 365,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_generate_ca_pem_matches_openssl() {
+        // Generate CA cert/key using our function
+        let mut cert_manager = CertManager {
+            ca_cert_path: PathBuf::from("/tmp/test_ca.crt"),
+            key_cert_path: PathBuf::from("/tmp/test_ca.key"),
+            cache_dir: PathBuf::from("/tmp/cache"),
+            ca_issuer: None,
+        };
+
+        let common_name = "Test CA";
+        let (cert_pem, key_pem) = cert_manager.generate_ca_pem(common_name).await.unwrap();
+
+        // Create temporary directory for OpenSSL generated files
+        let temp_dir = tempdir().unwrap();
+        let openssl_cert_path = temp_dir.path().join("openssl_ca.crt");
+        let openssl_key_path = temp_dir.path().join("openssl_ca.key");
+
+        // Generate CA cert/key using OpenSSL with same configuration
+        let openssl_result = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-keyout",
+                openssl_key_path.to_str().unwrap(),
+                "-out",
+                openssl_cert_path.to_str().unwrap(),
+                "-days",
+                "3650",
+                "-nodes", // No password
+                "-subj",
+                &format!(
+                    "/CN={}/O={}/C=CN/ST=ZJ/L=HZ/OU=Dev",
+                    common_name,
+                    env!("CARGO_PKG_NAME")
+                ),
+            ])
+            .output()
+            .expect("Failed to execute openssl command");
+
+        if !openssl_result.status.success() {
+            panic!(
+                "OpenSSL command failed: {}",
+                String::from_utf8_lossy(&openssl_result.stderr)
+            );
+        }
+
+        // Read OpenSSL generated files
+        let openssl_cert = std::fs::read_to_string(&openssl_cert_path).unwrap();
+        let openssl_key = std::fs::read_to_string(&openssl_key_path).unwrap();
+
+        // Print certificate information for debugging
+        println!("=== Generated Certificate Details ===");
+        println!(
+            "Generated Subject: {}",
+            extract_field_from_pem(&cert_pem, "subject")
+        );
+        println!(
+            "Generated Issuer: {}",
+            extract_field_from_pem(&cert_pem, "issuer")
+        );
+        println!(
+            "Generated Validity: {}",
+            extract_field_from_pem(&cert_pem, "dates")
+        );
+        println!(
+            "Generated Basic Constraints: {}",
+            extract_field_from_pem(&cert_pem, "basic_constraints")
+        );
+
+        println!("\n=== OpenSSL Certificate Details ===");
+        println!(
+            "OpenSSL Subject: {}",
+            extract_field_from_pem(&openssl_cert, "subject")
+        );
+        println!(
+            "OpenSSL Issuer: {}",
+            extract_field_from_pem(&openssl_cert, "issuer")
+        );
+        println!(
+            "OpenSSL Validity: {}",
+            extract_field_from_pem(&openssl_cert, "dates")
+        );
+
+        // Extract and compare certificate information
+        // Compare subject information
+        let cert_subject = extract_field_from_pem(&cert_pem, "subject");
+        let openssl_cert_subject = extract_field_from_pem(&openssl_cert, "subject");
+        assert_eq!(
+            cert_subject, openssl_cert_subject,
+            "Subject fields should match"
+        );
+
+        // Compare issuer information (for self-signed certs, should match subject)
+        let cert_issuer = extract_field_from_pem(&cert_pem, "issuer");
+        let openssl_cert_issuer = extract_field_from_pem(&openssl_cert, "issuer");
+        assert_eq!(
+            cert_issuer, openssl_cert_issuer,
+            "Issuer fields should match"
+        );
+
+        // Compare validity dates
+        let cert_dates = extract_field_from_pem(&cert_pem, "dates");
+        let openssl_dates = extract_field_from_pem(&openssl_cert, "dates");
+        println!("Generated Dates: {}", cert_dates);
+        println!("OpenSSL Dates: {}", openssl_dates);
+
+        // Compare basic constraints (should indicate CA for both)
+        let cert_basic_constraints = extract_field_from_pem(&cert_pem, "basic_constraints");
+        let openssl_basic_constraints = extract_field_from_pem(&openssl_cert, "basic_constraints");
+        println!("Generated Basic Constraints: {}", cert_basic_constraints);
+        println!("OpenSSL Basic Constraints: {}", openssl_basic_constraints);
+
+        // Check that both certificates are CAs
+        assert!(
+            cert_basic_constraints.contains("CA:TRUE")
+                || cert_basic_constraints.contains("CA:true"),
+            "Generated cert should be a CA"
+        );
+        assert!(
+            openssl_basic_constraints.contains("CA:TRUE")
+                || openssl_basic_constraints.contains("CA:true"),
+            "OpenSSL cert should be a CA"
+        );
+
+        // Both should have private key in PKCS#8 format
+        assert!(
+            key_pem.contains("PRIVATE KEY"),
+            "Generated key should be in PRIVATE KEY format"
+        );
+        assert!(
+            openssl_key.contains("PRIVATE KEY"),
+            "OpenSSL key should be in PRIVATE KEY format"
+        );
+
+        println!("\n=== Test Passed ===");
+        println!("Both certificates have matching subjects and are valid CAs");
+    }
+
+    fn extract_field_from_pem(pem: &str, field: &str) -> String {
+        let temp_dir = tempdir().unwrap();
+        let cert_path = temp_dir.path().join("cert.pem");
+        std::fs::write(&cert_path, pem).unwrap();
+
+        match field {
+            "subject" => {
+                let output = Command::new("openssl")
+                    .args([
+                        "x509",
+                        "-in",
+                        cert_path.to_str().unwrap(),
+                        "-noout",
+                        "-subject",
+                    ])
+                    .output()
+                    .expect("Failed to execute openssl x509 command");
+
+                if !output.status.success() {
+                    panic!(
+                        "OpenSSL x509 command failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            "issuer" => {
+                let output = Command::new("openssl")
+                    .args([
+                        "x509",
+                        "-in",
+                        cert_path.to_str().unwrap(),
+                        "-noout",
+                        "-issuer",
+                    ])
+                    .output()
+                    .expect("Failed to execute openssl x509 command");
+
+                if !output.status.success() {
+                    panic!(
+                        "OpenSSL x509 command failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            "dates" => {
+                let output = Command::new("openssl")
+                    .args([
+                        "x509",
+                        "-in",
+                        cert_path.to_str().unwrap(),
+                        "-noout",
+                        "-dates",
+                    ])
+                    .output()
+                    .expect("Failed to execute openssl x509 command");
+
+                if !output.status.success() {
+                    panic!(
+                        "OpenSSL x509 command failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            "basic_constraints" => {
+                let output = Command::new("openssl")
+                    .args([
+                        "x509",
+                        "-in",
+                        cert_path.to_str().unwrap(),
+                        "-noout",
+                        "-text",
+                    ])
+                    .output()
+                    .expect("Failed to execute openssl x509 command");
+
+                if !output.status.success() {
+                    panic!(
+                        "OpenSSL x509 command failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                // Extract Basic Constraints from the full text output
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines() {
+                    if line.contains("Basic Constraints") {
+                        // Also get the next line which contains the value
+                        let lines: Vec<&str> = output_str.lines().collect();
+                        let line_idx = lines
+                            .iter()
+                            .position(|&l| l.contains("Basic Constraints"))
+                            .unwrap();
+                        if line_idx + 1 < lines.len() {
+                            return format!("{}{}", line.trim(), lines[line_idx + 1].trim());
+                        }
+                        return line.trim().to_string();
+                    }
+                }
+                "Basic Constraints not found".to_string()
+            }
+            "full_text" => {
+                let output = Command::new("openssl")
+                    .args([
+                        "x509",
+                        "-in",
+                        cert_path.to_str().unwrap(),
+                        "-noout",
+                        "-text",
+                    ])
+                    .output()
+                    .expect("Failed to execute openssl x509 command");
+
+                if !output.status.success() {
+                    panic!(
+                        "OpenSSL x509 command failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            _ => "Unknown field".to_string(),
         }
     }
 }
