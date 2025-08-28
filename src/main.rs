@@ -22,3 +22,4 @@ async fn main() -> Result<()> {
 mod local;
 mod options;
 mod remote;
+mod crypto;

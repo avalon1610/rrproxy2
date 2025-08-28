@@ -1,6 +1,11 @@
-use crate::options::RemoteModeOptions;
+use crate::{options::RemoteModeOptions, remote::proxy::Proxy};
 use anyhow::Result;
 
-pub async fn start(_opts: RemoteModeOptions) -> Result<()> {
-    todo!()
+mod proxy;
+
+pub async fn start(opts: RemoteModeOptions) -> Result<()> {
+    let proxy = Proxy::new(opts);
+    proxy.serve().await?;
+
+    Ok(())
 }

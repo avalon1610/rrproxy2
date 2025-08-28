@@ -20,6 +20,11 @@ tokio-rustls = "0.24"
 rustls = "0.21"
 rustls-pemfile = "1.0"
 pin-project-lite = "0.2.16"
+rand = "0.9.2"
+reqwest = "0.12.23"
+uuid = { version = "1.18.0", features = ["v4"] }
+chacha20poly1305 = "0.10.1"
+base64ct = { version = "1.8.0", features = ["alloc"] }
 
 [dependencies.hyper-util]
 version = "0.1"

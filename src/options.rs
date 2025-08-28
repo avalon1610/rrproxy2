@@ -60,6 +60,10 @@ pub struct LocalModeOptions {
     /// The directory to cache the server certificate
     #[arg(long, default_value = "cert_cache")]
     pub cache_dir: PathBuf,
+
+    /// The token for authentication, if not set, will use default one
+    #[arg(long, short)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -67,4 +71,8 @@ pub struct RemoteModeOptions {
     /// The address to listen on
     #[arg(long, short, default_value = "127.0.0.1:8081")]
     pub listen: String,
+
+    /// generate an uuid token for authentication, it should be used in local mode
+    #[arg(long, short)]
+    pub generate_token: bool,
 }
