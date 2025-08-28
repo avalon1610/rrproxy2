@@ -5,15 +5,29 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.99"
+blake3 = "1.8.2"
 clap = { version = "4.5.46", features = ["derive"] }
+hex = "0.4"
 rcgen = { version = "0.14.3", features = ["x509-parser"] }
 time = "0.3.41"
 tokio = { version = "1.47.1", features = ["full"] }
 tracing = "0.1.41"
+hyper = { version = "1.0", features = ["server", "http1", "http2"] }
 
-[dev-dependencies]
-tempfile = "3.10"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tokio-rustls = "0.24"
+rustls = "0.21"
+rustls-pemfile = "1.0"
+pin-project-lite = "0.2.16"
+
+[dependencies.hyper-util]
+version = "0.1"
+features = ["tokio", "server", "http1", "http2"]
 
 [dependencies.misc]
 git = "http://172.29.3.68:3000/raven/misc.git"
 features = ["tracing_logger"]
+
+[dev-dependencies]
+tempfile = "3.21"

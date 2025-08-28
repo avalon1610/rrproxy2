@@ -1,13 +1,15 @@
 use anyhow::{Result, anyhow};
+use blake3;
+use hex;
 use rcgen::Issuer;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::fs::create_dir_all;
 use tokio::fs::read;
-use tokio::fs::{remove_dir_all, write};
-use tracing::warn;
+use tokio::fs::{create_dir_all, write};
+use tracing::{debug, warn};
 
 pub struct CertManager<'a> {
     /// root ca certificate
@@ -18,11 +20,17 @@ pub struct CertManager<'a> {
     cache_dir: PathBuf,
     /// root ca certificate
     ca_issuer: Option<Issuer<'a, KeyPair>>,
+    /// memory cache
+    cache: HashMap<String, (String, String)>,
 }
 
 impl CertManager<'_> {
+    pub fn has_issuer(&self) -> bool {
+        self.ca_issuer.is_some()
+    }
+
     pub async fn new(cert: PathBuf, key: PathBuf, cache_dir: PathBuf) -> Result<Self> {
-        if cache_dir.exists() {
+        if !cache_dir.exists() {
             create_dir_all(&cache_dir).await?;
         }
 
@@ -43,6 +51,7 @@ impl CertManager<'_> {
             key_cert_path: key,
             cache_dir,
             ca_issuer,
+            cache: HashMap::new(),
         })
     }
 
@@ -56,6 +65,53 @@ impl CertManager<'_> {
     }
 
     pub async fn generate_srv_pem(
+        &mut self,
+        common_name: impl Into<String>,
+    ) -> Result<(String, String)> {
+        let common_name = common_name.into();
+        debug!("generating certificate for {}", common_name);
+
+        // Check memory cache first
+        if let Some(cached) = self.cache.get(&common_name) {
+            debug!("return {} cert from memory cache", common_name);
+            return Ok(cached.clone());
+        }
+
+        // Generate hash for disk cache filenames
+        let hash = blake3::hash(common_name.as_bytes());
+        let hash_hex = hex::encode(hash.as_bytes());
+
+        // Check disk cache
+        let cert_path = self.cache_dir.join(format!("{}.cert", hash_hex));
+        let key_path = self.cache_dir.join(format!("{}.key", hash_hex));
+
+        if cert_path.exists() && key_path.exists() {
+            let cert_pem = String::from_utf8_lossy(&read(&cert_path).await?).to_string();
+            let key_pem = String::from_utf8_lossy(&read(&key_path).await?).to_string();
+            debug!("return {} cert from disk cache", common_name);
+
+            // Store in memory cache
+            self.cache
+                .insert(common_name, (cert_pem.clone(), key_pem.clone()));
+
+            return Ok((cert_pem, key_pem));
+        }
+
+        // Generate new certificate if not found in caches
+        let (cert_pem, key_pem) = self.generate_srv_pem_impl(&common_name).await?;
+
+        // Store in memory cache
+        self.cache
+            .insert(common_name.clone(), (cert_pem.clone(), key_pem.clone()));
+
+        write(&cert_path, &cert_pem).await?;
+        write(&key_path, &key_pem).await?;
+
+        debug!("generated and cached cert for {}", common_name);
+        Ok((cert_pem, key_pem))
+    }
+
+    async fn generate_srv_pem_impl(
         &self,
         common_name: impl Into<String>,
     ) -> Result<(String, String)> {
@@ -128,8 +184,23 @@ impl CertManager<'_> {
 
     pub async fn clear_cache(&self) {
         if self.cache_dir.exists() {
-            if let Err(e) = remove_dir_all(&self.cache_dir).await {
-                warn!("failed to clear cache dir: {}", e)
+            let mut dir = match tokio::fs::read_dir(&self.cache_dir).await {
+                Ok(dir) => dir,
+                Err(e) => {
+                    warn!("failed to read cache dir: {}", e);
+                    return;
+                }
+            };
+
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let path = entry.path();
+                // Try to remove as a file first
+                if let Err(_) = tokio::fs::remove_file(&path).await {
+                    // If that fails, try to remove as a directory
+                    if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                        warn!("failed to remove cache entry {:?}: {}", path, e);
+                    }
+                }
             }
         }
     }
@@ -199,6 +270,7 @@ mod tests {
             key_cert_path: PathBuf::from("/tmp/test_ca.key"),
             cache_dir: PathBuf::from("/tmp/cache"),
             ca_issuer: None,
+            cache: HashMap::new(),
         };
 
         let common_name = "Test CA";
@@ -339,7 +411,10 @@ mod tests {
         let ca_key_path = PathBuf::from("./tests/key.ca.pem");
 
         // Initialize CertManager with the existing CA
-        let cert_manager = CertManager::new(ca_cert_path, ca_key_path, PathBuf::from("/tmp/cache")).await.unwrap();
+        let mut cert_manager =
+            CertManager::new(ca_cert_path, ca_key_path, PathBuf::from("/tmp/cache"))
+                .await
+                .unwrap();
 
         let common_name = "localhost";
 
@@ -360,12 +435,7 @@ mod tests {
 
         // Generate server private key using OpenSSL
         let openssl_key_result = Command::new("openssl")
-            .args([
-                "genrsa",
-                "-out",
-                openssl_key_path.to_str().unwrap(),
-                "2048",
-            ])
+            .args(["genrsa", "-out", openssl_key_path.to_str().unwrap(), "2048"])
             .output()
             .expect("Failed to execute openssl genrsa command");
 
@@ -404,7 +474,8 @@ mod tests {
 
         // Create an extension file for key usage
         let ext_file_path = temp_dir.path().join("extensions.cnf");
-        let ext_content = "basicConstraints = CA:false\nkeyUsage = critical,digitalSignature,keyEncipherment\n";
+        let ext_content =
+            "basicConstraints = CA:false\nkeyUsage = critical,digitalSignature,keyEncipherment\n";
         std::fs::write(&ext_file_path, ext_content).unwrap();
 
         // Sign the CSR with the CA to generate server certificate using OpenSSL
@@ -515,6 +586,59 @@ mod tests {
 
         println!("\n=== Test Passed ===");
         println!("Both server certificates have matching subjects and issuers");
+    }
+
+    #[tokio::test]
+    async fn test_generate_srv_pem_cache() {
+        // Create a temporary directory for cache
+        let temp_dir = tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        let ca_cert_path = PathBuf::from("./tests/cert.ca.pem");
+        let ca_key_path = PathBuf::from("./tests/key.ca.pem");
+
+        // Initialize CertManager with the existing CA
+        let mut cert_manager =
+            CertManager::new(ca_cert_path.clone(), ca_key_path.clone(), cache_dir.clone())
+                .await
+                .unwrap();
+
+        let common_name = "test-cache.example.com";
+
+        // Generate certificate for the first time
+        let (cert_pem1, key_pem1) = cert_manager.generate_srv_pem(common_name).await.unwrap();
+
+        // Check that certificate is now in memory cache
+        assert!(cert_manager.cache.contains_key(common_name));
+
+        // Check that certificate files are written to disk cache
+        let hash = blake3::hash(common_name.as_bytes());
+        let hash_hex = hex::encode(hash.as_bytes());
+        let cert_path = cache_dir.join(format!("{}.cert", hash_hex));
+        let key_path = cache_dir.join(format!("{}.key", hash_hex));
+        assert!(cert_path.exists());
+        assert!(key_path.exists());
+
+        // Generate certificate for the second time (should use cache)
+        let (cert_pem2, key_pem2) = cert_manager.generate_srv_pem(common_name).await.unwrap();
+
+        // Verify cached certificate is returned
+        assert_eq!(cert_pem1, cert_pem2);
+        assert_eq!(key_pem1, key_pem2);
+
+        // Create a new CertManager to test disk cache loading
+        let mut cert_manager2 =
+            CertManager::new(ca_cert_path.clone(), ca_key_path.clone(), cache_dir)
+                .await
+                .unwrap();
+
+        // Generate certificate with new manager (should load from disk cache)
+        let (cert_pem3, key_pem3) = cert_manager2.generate_srv_pem(common_name).await.unwrap();
+
+        // Verify disk cached certificate is returned
+        assert_eq!(cert_pem1, cert_pem3);
+        assert_eq!(key_pem1, key_pem3);
+        // Memory cache should now also contain the certificate
+        assert!(cert_manager2.cache.contains_key(common_name));
     }
 
     fn extract_field_from_pem(pem: &str, field: &str) -> String {
@@ -648,10 +772,7 @@ mod tests {
                     if line.contains("Key Usage") {
                         // Also get the next line which contains the value
                         let lines: Vec<&str> = output_str.lines().collect();
-                        let line_idx = lines
-                            .iter()
-                            .position(|&l| l.contains("Key Usage"))
-                            .unwrap();
+                        let line_idx = lines.iter().position(|&l| l.contains("Key Usage")).unwrap();
                         if line_idx + 1 < lines.len() {
                             return format!("{}{}", line.trim(), lines[line_idx + 1].trim());
                         }

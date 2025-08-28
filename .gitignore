@@ -3,3 +3,4 @@
 *.pem
 !tests/cert.ca.pem
 !tests/key.ca.pem
+cert_cache/
