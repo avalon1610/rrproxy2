@@ -95,7 +95,8 @@ impl Forwarder {
                 .proxy(Proxy::all(proxy).context("invalid proxy option")?)
                 .build()?
         } else {
-            client.build()?
+            // add no_proxy to make it not use http_proxy and https_proxy env variables
+            client.no_proxy().build()?
         };
 
         Ok(Self {
@@ -124,11 +125,10 @@ impl Forwarder {
 
         let info = format!(
             "{}+{:?}+{}+{}",
-            self.parts.method,
-            self.parts.version,
-            content_type,
-            url
+            self.parts.method, self.parts.version, content_type, url
         );
+        debug!("build original info: {info}");
+
         let encryptor = Encryptor::new(self.token);
         headers.insert(
             ORIGINAL_URL_HEADER,
@@ -178,7 +178,7 @@ impl Forwarder {
             uuid,
             last_response.status()
         );
-        
+
         last_response.convert().await
     }
 
@@ -198,7 +198,11 @@ impl Forwarder {
             if self.is_https { "https" } else { "http" },
             host,
             parts.uri.path(),
-            parts.uri.query().unwrap_or("")
+            if let Some(query) = parts.uri.query() {
+                format!("?{}", query)
+            } else {
+                "".to_owned()
+            }
         )
         .parse()?)
     }

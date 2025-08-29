@@ -41,7 +41,8 @@ impl Proxy for RemoteProxy {
         let client = if let Some(proxy) = &opts.common.proxy {
             client.proxy(reqwest::Proxy::all(proxy)?).build()?
         } else {
-            client.build()?
+            // add no_proxy to make it not use http_proxy and https_proxy env variables
+            client.no_proxy().build()?
         };
 
         Ok(Self {
