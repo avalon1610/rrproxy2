@@ -19,6 +19,7 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 use tracing::{debug, info, warn};
 
@@ -68,7 +69,6 @@ impl Proxy for RemoteProxy {
         match self.handle_request(request).await {
             Ok(response) => Ok(response),
             Err(err) => {
-                let err = format!("{err:?}");
                 warn!("handle error: {err:?}");
 
                 // CAUTION: Do not return details error info to client, make sure client can not detect our purpose.
@@ -86,16 +86,17 @@ impl RemoteProxy {
         &self,
         mut request: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>> {
+        let now = Instant::now();
         let info = Info::parse(&mut request, &self.decryptor)?;
         debug!("parsed info {:?}", info);
         let (parts, body) = request.into_parts();
         let body = body.collect().await?.to_bytes();
         let body = self.decryptor.decrypt(&body)?;
         let body = Bytes::from_owner(body);
+        let id = info.id.clone();
 
         let request = {
             let mut transactions = self.transactions.lock().unwrap();
-            let id = info.id.clone();
             let transaction = if let Some(mut t) = transactions.remove(&id) {
                 // old transaction, we update the body and chunk index
                 debug!("transaction {id} updated {} bytes", body.len());
@@ -117,14 +118,16 @@ impl RemoteProxy {
             }
         };
 
-        if let Some(request) = request {
+        if let Some((request, start)) = request {
             let response = self
                 .client
                 .execute(request)
                 .await
                 .context("target request error")?;
+            info!("handle whole transaction {} cost {:?}", id, start.elapsed());
             Ok(response.convert().await?)
         } else {
+            info!("handle single chunk cost {:?}", now.elapsed());
             Ok(Response::default())
         }
     }

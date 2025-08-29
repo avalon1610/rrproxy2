@@ -40,7 +40,7 @@ where
 
             tokio::spawn(async move {
                 if let Err(err) = Builder::new(TokioExecutor::new())
-                    .serve_connection(
+                    .serve_connection_with_upgrades(
                         io,
                         service_fn(|req| {
                             let proxy = proxy.clone();

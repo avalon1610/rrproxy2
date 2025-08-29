@@ -1,5 +1,4 @@
 use crate::{
-    crypto::{Decryptor, Encryptor, default_token},
     local::{cert::CertManager, forward::Forwarder},
     options::LocalModeOptions,
     proxy::Proxy,
@@ -10,8 +9,8 @@ use hyper::{
     Method, Request, Response,
     body::{Bytes, Incoming},
 };
-use std::{convert::Infallible, net::SocketAddr, sync::Arc};
-use tracing::{debug, warn};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct LocalProxy {
@@ -35,7 +34,7 @@ impl Proxy for LocalProxy {
 
         Ok(Self {
             cm: Arc::new(cm),
-         
+
             opts: Arc::new(opts),
         })
     }
@@ -45,18 +44,22 @@ impl Proxy for LocalProxy {
         req: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
+        let now = Instant::now();
         let res = match req.method() {
             &Method::CONNECT => {
-                debug!("CONNECT request from {}", addr);
+                info!("CONNECT request from {}", addr);
                 // Handle HTTPS CONNECT request
                 self.handle_connect(req).await
             }
             _ => {
-                debug!("{} request from {}", req.method(), addr);
+                info!("{} request from {}", req.method(), addr);
                 // Handle regular HTTP requests
-                self.handle_http_request(req).await
+                self.handle_request(req, false).await
             }
         };
+
+        let elapsed = now.elapsed();
+        info!("handle request took {:?}", elapsed);
 
         match res {
             Ok(r) => Ok(r),
@@ -75,8 +78,12 @@ impl Proxy for LocalProxy {
 }
 
 impl LocalProxy {
-    async fn handle_http_request(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>> {
-        let forwarder = Forwarder::new(req, &self.opts).await?;
+    async fn handle_request(
+        &self,
+        req: Request<Incoming>,
+        is_https: bool,
+    ) -> Result<Response<Full<Bytes>>> {
+        let forwarder = Forwarder::new(req, &self.opts, is_https).await?;
         let response = forwarder.apply().await?;
 
         Ok(response)

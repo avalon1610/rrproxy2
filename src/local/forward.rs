@@ -10,12 +10,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
 use http_body_util::{BodyExt, Full};
 use hyper::{
-    HeaderMap, Request, Response,
+    HeaderMap, Request, Response, Uri,
     body::{Bytes, Incoming},
-    header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING},
     http::request::Parts,
 };
 use reqwest::Proxy;
+use tracing::debug;
 use uuid::Uuid;
 
 pub struct Forwarder {
@@ -24,10 +25,15 @@ pub struct Forwarder {
     client: reqwest::Client,
     parts: Parts,
     token: String,
+    is_https: bool,
 }
 
 impl Forwarder {
-    pub async fn new(req: Request<Incoming>, opts: &LocalModeOptions) -> Result<Self> {
+    pub async fn new(
+        req: Request<Incoming>,
+        opts: &LocalModeOptions,
+        is_https: bool,
+    ) -> Result<Self> {
         let chunk_size = opts.chunk;
         let remote_addr = opts.remote.clone();
 
@@ -96,6 +102,7 @@ impl Forwarder {
             chunks,
             remote_addr,
             client,
+            is_https,
             parts,
             token: opts.common.token.clone().unwrap_or_else(|| default_token()),
         })
@@ -105,6 +112,7 @@ impl Forwarder {
         let mut headers = HeaderMap::new();
         headers.insert("User-Agent", USER_AGENT.parse()?);
         let uuid = Uuid::new_v4().to_string();
+        debug!("begin transaction {}", uuid);
         headers.insert(TRANSACTION_ID_HEADER, uuid.parse()?);
         let content_type = self
             .parts
@@ -112,10 +120,14 @@ impl Forwarder {
             .get(CONTENT_TYPE)
             .map(|c| c.to_str().unwrap_or(""))
             .unwrap_or("");
+        let url = self.build_full_url(&self.parts)?;
 
         let info = format!(
             "{}+{:?}+{}+{}",
-            self.parts.method, self.parts.version, content_type, self.parts.uri
+            self.parts.method,
+            self.parts.version,
+            content_type,
+            url.to_string()
         );
         let encryptor = Encryptor::new(self.token);
         headers.insert(
@@ -138,6 +150,13 @@ impl Forwarder {
             // we need reset the Content-Length and Content-Type headers
             headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
             headers.insert(CONTENT_TYPE, "application/octet-stream".parse()?);
+            debug!(
+                "forwarding to {} [{}] with chunk index {} size {}",
+                uuid,
+                self.remote_addr,
+                index,
+                chunk.len()
+            );
 
             let response = self
                 .client
@@ -152,10 +171,35 @@ impl Forwarder {
             }
         }
 
-        Ok(last_response
-            .ok_or_else(|| anyhow!("no response for {uuid}, {}", self.parts.uri))?
-            .convert()
-            .await?)
+        let last_response =
+            last_response.ok_or_else(|| anyhow!("no response for {uuid}, {}", self.parts.uri))?;
+        debug!(
+            "end transaction {}, last response status: {}",
+            uuid,
+            last_response.status()
+        );
+        Ok(last_response.convert().await?)
+    }
+
+    fn build_full_url(&self, parts: &Parts) -> Result<Uri> {
+        if parts.uri.scheme().is_some() && parts.uri.authority().is_some() {
+            return Ok(parts.uri.clone());
+        }
+
+        let host = parts
+            .headers
+            .get(HOST)
+            .ok_or_else(|| anyhow!("Can not get {HOST} header"))?
+            .to_str()?;
+
+        Ok(format!(
+            "{}://{}{}{}",
+            if self.is_https { "https" } else { "http" },
+            host,
+            parts.uri.path(),
+            parts.uri.query().unwrap_or("")
+        )
+        .parse()?)
     }
 }
 

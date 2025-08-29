@@ -6,11 +6,13 @@ use hyper::http::request::Parts;
 use hyper::{HeaderMap, Version};
 use reqwest::Request;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 pub struct Transaction {
     headers: HeaderMap,
     info: Info,
     cache: BTreeMap<usize, Bytes>,
+    pub start: Instant,
 }
 
 impl Transaction {
@@ -23,6 +25,7 @@ impl Transaction {
             headers,
             info,
             cache,
+            start: Instant::now(),
         }
     }
 
@@ -54,13 +57,13 @@ impl Transaction {
         headers.insert(CONTENT_LENGTH, body.len().to_string().parse()?);
 
         *request.body_mut() = Some(body.into());
-        Ok(TransactionState::Committed(request))
+        Ok(TransactionState::Committed((request, self.start)))
     }
 }
 
 pub enum TransactionState {
     Pending(Transaction),
-    Committed(Request),
+    Committed((Request, Instant)),
 }
 
 trait VersionExt {

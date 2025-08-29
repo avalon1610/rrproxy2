@@ -4,3 +4,5 @@
 !tests/cert.ca.pem
 !tests/key.ca.pem
 cert_cache/
+local_proxy_logs/
+remote_proxy_logs/

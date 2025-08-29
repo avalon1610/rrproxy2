@@ -64,7 +64,7 @@ impl LocalProxy {
                 TokioIo::new(tls_stream),
                 service_fn(move |req| {
                     let proxy = self.clone();
-                    async move { proxy.handle_http_request(req).await }
+                    async move { proxy.handle_request(req, true).await }
                 }),
             )
             .await
