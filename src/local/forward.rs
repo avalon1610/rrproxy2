@@ -1,9 +1,10 @@
 use crate::{
     crypto::{Encryptor, default_token},
-    local::headers::{
-        CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER,
-    },
     options::LocalModeOptions,
+    proxy::{
+        CHUNK_INDEX_HEADER, HyperConverter, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER,
+        TRANSACTION_ID_HEADER,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
@@ -11,7 +12,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     HeaderMap, Request, Response,
     body::{Bytes, Incoming},
-    header::{CONTENT_LENGTH, TRANSFER_ENCODING},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
     http::request::Parts,
 };
 use reqwest::Proxy;
@@ -83,7 +84,7 @@ impl Forwarder {
         let client = reqwest::ClientBuilder::new()
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true);
-        let client = if let Some(proxy) = &opts.proxy {
+        let client = if let Some(proxy) = &opts.common.proxy {
             client
                 .proxy(Proxy::all(proxy).context("invalid proxy option")?)
                 .build()?
@@ -96,7 +97,7 @@ impl Forwarder {
             remote_addr,
             client,
             parts,
-            token: opts.token.clone().unwrap_or_else(|| default_token()),
+            token: opts.common.token.clone().unwrap_or_else(|| default_token()),
         })
     }
 
@@ -105,10 +106,16 @@ impl Forwarder {
         headers.insert("User-Agent", USER_AGENT.parse()?);
         let uuid = Uuid::new_v4().to_string();
         headers.insert(TRANSACTION_ID_HEADER, uuid.parse()?);
+        let content_type = self
+            .parts
+            .headers
+            .get(CONTENT_TYPE)
+            .map(|c| c.to_str().unwrap_or(""))
+            .unwrap_or("");
 
         let info = format!(
-            "{}+{:?}+{}",
-            self.parts.method, self.parts.version, self.parts.uri
+            "{}+{:?}+{}+{}",
+            self.parts.method, self.parts.version, content_type, self.parts.uri
         );
         let encryptor = Encryptor::new(self.token);
         headers.insert(
@@ -127,6 +134,10 @@ impl Forwarder {
         for (index, chunk) in self.chunks.into_iter().enumerate() {
             headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
             let chunk = encryptor.encrypt(chunk)?;
+
+            // we need reset the Content-Length and Content-Type headers
+            headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
+            headers.insert(CONTENT_TYPE, "application/octet-stream".parse()?);
 
             let response = self
                 .client
@@ -150,24 +161,3 @@ impl Forwarder {
 
 // TODO: make this configurable
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
-
-pub trait HyperConverter {
-    async fn convert(self) -> Result<Response<Full<Bytes>>>;
-}
-
-impl HyperConverter for reqwest::Response {
-    async fn convert(self) -> Result<Response<Full<Bytes>>> {
-        let mut res = Response::builder()
-            .status(self.status())
-            .version(self.version());
-        if let Some(headers) = res.headers_mut() {
-            *headers = self.headers().clone();
-        }
-
-        let res = res
-            .body(Full::new(self.bytes().await?))
-            .map_err(|e| anyhow!("failed to convert response: {e:?}"))?;
-
-        Ok(res)
-    }
-}

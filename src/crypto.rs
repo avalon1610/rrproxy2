@@ -8,6 +8,8 @@ pub struct Encryptor {
     associated_data: Vec<u8>,
 }
 
+pub type Decryptor = Encryptor;
+
 pub fn default_token() -> String {
     format!("{}", package_info())
 }

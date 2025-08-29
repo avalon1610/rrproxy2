@@ -1,4 +1,9 @@
-use crate::options::{Commands, Options};
+use crate::{
+    local::LocalProxy,
+    options::{Commands, Options},
+    proxy::Proxy,
+    remote::RemoteProxy,
+};
 use anyhow::Result;
 use clap::Parser;
 use misc::TracingLogger;
@@ -14,12 +19,18 @@ async fn main() -> Result<()> {
 
     let _log = TracingLogger::new(".", env!("CARGO_PKG_NAME"), level, "info")?.init()?;
     match opts.command {
-        Commands::Local(o) => local::start(o).await,
-        Commands::Remote(o) => remote::start(o).await,
+        Commands::Local(o) => start::<LocalProxy>(o).await,
+        Commands::Remote(o) => start::<RemoteProxy>(o).await,
     }
 }
 
+async fn start<P: Proxy>(opts: P::Options) -> Result<()> {
+    let proxy = P::new(opts).await?;
+    proxy.serve().await
+}
+
+mod crypto;
 mod local;
 mod options;
+mod proxy;
 mod remote;
-mod crypto;

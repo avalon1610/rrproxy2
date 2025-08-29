@@ -24,10 +24,24 @@ pub enum Commands {
 }
 
 #[derive(Debug, Parser)]
-pub struct LocalModeOptions {
+pub struct CommonOptions {
     /// The address to listen on
     #[arg(long, short, default_value = "127.0.0.1:8080")]
     pub listen: String,
+
+    /// The optional proxy address to use between local and remote. The proxy address should starts with http://
+    #[arg(short, long, short)]
+    pub proxy: Option<String>,
+
+    /// The token for encryption, if not set, will use default one
+    #[arg(long, short)]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+pub struct LocalModeOptions {
+    #[command(flatten)]
+    pub common: CommonOptions,
 
     /// The address to forward requests to, should starts with http://
     #[arg(long, short, default_value = "http://127.0.0.1:8081")]
@@ -36,10 +50,6 @@ pub struct LocalModeOptions {
     /// The size of the chunk to split for the large request
     #[arg(long, short, default_value_t = 10240)]
     pub chunk: usize,
-
-    /// The optional proxy address to use between local and remote. The proxy address should starts with http://
-    #[arg(short, long, short)]
-    pub proxy: Option<String>,
 
     /// The Root CA certificate file path
     #[arg(long, default_value = "cert.ca.pem")]
@@ -60,19 +70,14 @@ pub struct LocalModeOptions {
     /// The directory to cache the server certificate
     #[arg(long, default_value = "cert_cache")]
     pub cache_dir: PathBuf,
-
-    /// The token for authentication, if not set, will use default one
-    #[arg(long, short)]
-    pub token: Option<String>,
 }
 
 #[derive(Debug, Parser)]
 pub struct RemoteModeOptions {
-    /// The address to listen on
-    #[arg(long, short, default_value = "127.0.0.1:8081")]
-    pub listen: String,
+    #[command(flatten)]
+    pub common: CommonOptions,
 
-    /// generate an uuid token for authentication, it should be used in local mode
+    /// generate an uuid token for encryption.
     #[arg(long, short)]
     pub generate_token: bool,
 }
