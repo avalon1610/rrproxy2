@@ -13,7 +13,7 @@ release_linux:
 release: release_linux release_windows
     cp target/x86_64-pc-windows-msvc/release/rrproxy2.exe target/rrproxy2.exe
     cp target/x86_64-unknown-linux-gnu/release/rrproxy2 target/rrproxy2
-    zip -r rrproxy2.zip target/rrproxy2.exe target/rrproxy2
+    zip -r target/rrproxy2.zip target/rrproxy2.exe target/rrproxy2
 
 alias dl := debug_local
 alias dr := debug_remote
