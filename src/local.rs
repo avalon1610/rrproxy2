@@ -67,7 +67,7 @@ impl Proxy for LocalProxy {
                 let err = format!("{err:?}");
                 warn!("handle error: {err}");
 
-                return Ok(Response::builder().status(400).body(err.into()).unwrap()); // this unwrap never fails, because only set the status code
+                Ok(Response::builder().status(400).body(err.into()).unwrap()) // this unwrap never fails, because only set the status code
             }
         }
     }

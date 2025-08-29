@@ -1,6 +1,4 @@
 use anyhow::{Result, anyhow};
-use blake3;
-use hex;
 use rcgen::Issuer;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
@@ -208,7 +206,7 @@ impl CertManager {
             while let Ok(Some(entry)) = dir.next_entry().await {
                 let path = entry.path();
                 // Try to remove as a file first
-                if let Err(_) = tokio::fs::remove_file(&path).await {
+                if tokio::fs::remove_file(&path).await.is_err() {
                     // If that fails, try to remove as a directory
                     if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                         warn!("failed to remove cache entry {:?}: {}", path, e);

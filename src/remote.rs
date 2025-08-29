@@ -47,7 +47,7 @@ impl Proxy for RemoteProxy {
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
             decryptor: Arc::new(Decryptor::new(
-                opts.common.token.clone().unwrap_or_else(|| default_token()),
+                opts.common.token.clone().unwrap_or_else(default_token),
             )),
             opts: Arc::new(opts),
             client,

@@ -56,7 +56,7 @@ impl LocalProxy {
             downcast::<TokioIo<TcpStream>>(upgraded).map_err(|_| anyhow!("Failed to downcast"))?;
         let buffer = PreBuffered::new(stream.read_buf, stream.io.into_inner());
 
-        let tls_acceptor = create_tls_acceptor(&cert, &key)?;
+        let tls_acceptor = create_tls_acceptor(cert, key)?;
         let tls_stream = tls_acceptor.accept(buffer).await?;
 
         if let Err(e) = Builder::new(TokioExecutor::new())

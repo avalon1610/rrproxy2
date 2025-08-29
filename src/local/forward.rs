@@ -104,7 +104,7 @@ impl Forwarder {
             client,
             is_https,
             parts,
-            token: opts.common.token.clone().unwrap_or_else(|| default_token()),
+            token: opts.common.token.clone().unwrap_or_else(default_token),
         })
     }
 
@@ -127,7 +127,7 @@ impl Forwarder {
             self.parts.method,
             self.parts.version,
             content_type,
-            url.to_string()
+            url
         );
         let encryptor = Encryptor::new(self.token);
         headers.insert(
@@ -178,7 +178,8 @@ impl Forwarder {
             uuid,
             last_response.status()
         );
-        Ok(last_response.convert().await?)
+        
+        last_response.convert().await
     }
 
     fn build_full_url(&self, parts: &Parts) -> Result<Uri> {

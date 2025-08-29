@@ -11,7 +11,7 @@ pub struct Encryptor {
 pub type Decryptor = Encryptor;
 
 pub fn default_token() -> String {
-    format!("{}", package_info())
+    package_info()
 }
 
 pub fn package_info() -> String {
@@ -36,9 +36,9 @@ impl Encryptor {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(data);
 
-        let mut cipher = ChaCha20Poly1305::new(&self.key.try_into()?);
+        let mut cipher = ChaCha20Poly1305::new(&self.key.into());
         cipher
-            .encrypt_in_place(&self.nonce.try_into()?, &self.associated_data, &mut buffer)
+            .encrypt_in_place(&self.nonce.into(), &self.associated_data, &mut buffer)
             .map_err(|e| anyhow!("encrypt in replace error: {e:?}"))?;
 
         Ok(buffer)
@@ -48,9 +48,9 @@ impl Encryptor {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(data);
 
-        let mut cipher = ChaCha20Poly1305::new(&self.key.try_into()?);
+        let mut cipher = ChaCha20Poly1305::new(&self.key.into());
         cipher
-            .decrypt_in_place(&self.nonce.try_into()?, &self.associated_data, &mut buffer)
+            .decrypt_in_place(&self.nonce.into(), &self.associated_data, &mut buffer)
             .map_err(|e| anyhow!("decrypt in place error: {e:?}"))?;
 
         Ok(buffer)

@@ -17,20 +17,26 @@ async fn main() -> Result<()> {
         _ => "trace",
     };
 
+    let log_dir = match opts.command {
+        Commands::Local(_) => "local_proxy_logs",
+        Commands::Remote(_) => "remote_proxy_logs",
+    };
+
+    let _log = TracingLogger::new(log_dir, env!("CARGO_PKG_NAME"), level, "info")?.init()?;
     match opts.command {
         Commands::Local(o) => {
-            let _log =
-                TracingLogger::new("local_proxy_logs", env!("CARGO_PKG_NAME"), level, "info")?
-                    .init()?;
-            start::<LocalProxy>(o).await
+            start::<LocalProxy>(o).await?;
         }
         Commands::Remote(o) => {
-            let _log =
-                TracingLogger::new("remote_proxy_logs", env!("CARGO_PKG_NAME"), level, "info")?
-                    .init()?;
-            start::<RemoteProxy>(o).await
+            if o.generate_token {
+                println!("{}", uuid::Uuid::new_v4());
+            } else {
+                start::<RemoteProxy>(o).await?;
+            }
         }
     }
+
+    Ok(())
 }
 
 async fn start<P: Proxy>(opts: P::Options) -> Result<()> {
