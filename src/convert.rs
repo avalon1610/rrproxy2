@@ -3,7 +3,7 @@ use crate::proxy::CONTENT_TYPE_HEADER;
 use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Response};
 
 /// Trait for response conversion between reqwest and hyper formats
@@ -75,6 +75,8 @@ impl ResponseConverter for reqwest::Response {
 
             C::adjust_content_type(&mut headers).context("adjust content type error")?;
             headers.insert(CONTENT_LENGTH, body.len().to_string().parse()?);
+            // remove transfer-encoding header if present, Transfer-encoding: chunked not compatible with Content-Length header
+            headers.remove(TRANSFER_ENCODING);
             body
         };
 

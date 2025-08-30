@@ -40,14 +40,10 @@ impl Transaction {
 
         let method = (&*self.info.method).try_into()?;
         let url = self.info.url.parse()?;
-        let _version = self.info.version.parse_version()?;
+        let version = self.info.version.parse_version()?;
 
         let mut request = Request::new(method, url);
-        // *request.version_mut() = version;
-
-        // use HTTP/1.0 make server will not return with "transfer-encoding": "chunked", which do not support yet
-        // FIXME: remove this when chunked transfer is supported
-        *request.version_mut() = Version::HTTP_10;
+        *request.version_mut() = version;
 
         let headers = request.headers_mut();
         headers.extend(self.headers);
