@@ -9,7 +9,7 @@ use hyper::{
     Method, Request, Response,
     body::{Bytes, Incoming},
 };
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Instant};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tracing::{info, warn};
 
 #[derive(Clone)]
@@ -44,7 +44,6 @@ impl Proxy for LocalProxy {
         req: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
-        let now = Instant::now();
         let res = match req.method() {
             &Method::CONNECT => {
                 info!("CONNECT request from {}", addr);
@@ -57,9 +56,6 @@ impl Proxy for LocalProxy {
                 self.handle_request(req, false).await
             }
         };
-
-        let elapsed = now.elapsed();
-        info!("handle request took {:?}", elapsed);
 
         match res {
             Ok(r) => Ok(r),

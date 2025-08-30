@@ -1,5 +1,5 @@
 use crate::{
-    crypto::Decryptor,
+    crypto::Cipher,
     proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
 };
 use anyhow::{Context, Result, anyhow};
@@ -18,7 +18,7 @@ pub struct Info {
 }
 
 impl Info {
-    pub fn parse(request: &mut Request<Incoming>, decryptor: &Decryptor) -> Result<Self> {
+    pub fn parse(request: &mut Request<Incoming>, cipher: &Cipher) -> Result<Self> {
         let headers = request.headers_mut();
 
         let id = headers
@@ -57,7 +57,7 @@ impl Info {
             .with_context(|| format!("Invalid {TOTAL_CHUNKS_HEADER} header, not a number"))?;
 
         let url = Base64::decode_vec(url)?;
-        let url = decryptor.decrypt(&url)?;
+        let url = cipher.decrypt(&url)?;
         let url = String::from_utf8_lossy(&url);
         let mut spans = url.split('+');
         let method = spans

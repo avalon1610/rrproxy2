@@ -49,3 +49,4 @@ mod local;
 mod options;
 mod proxy;
 mod remote;
+mod convert;

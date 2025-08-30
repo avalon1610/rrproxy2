@@ -1,7 +1,8 @@
 use crate::{
-    crypto::{Decryptor, default_token},
+    convert::{Encryptor, ResponseConverter},
+    crypto::{Cipher, default_token},
     options::RemoteModeOptions,
-    proxy::{HyperConverter, Proxy},
+    proxy::Proxy,
     remote::{
         info::Info,
         transaction::{Transaction, TransactionState},
@@ -21,13 +22,13 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
 pub struct RemoteProxy {
     opts: Arc<RemoteModeOptions>,
     transactions: Arc<Mutex<HashMap<String, Transaction>>>,
-    decryptor: Arc<Decryptor>,
+    cipher: Arc<Cipher>,
     client: Client,
 }
 
@@ -45,11 +46,11 @@ impl Proxy for RemoteProxy {
             client.no_proxy().build()?
         };
 
+        let token = opts.common.token.clone().unwrap_or_else(default_token);
+
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
-            decryptor: Arc::new(Decryptor::new(
-                opts.common.token.clone().unwrap_or_else(default_token),
-            )),
+            cipher: Arc::new(Cipher::new(token)),
             opts: Arc::new(opts),
             client,
         })
@@ -88,11 +89,11 @@ impl RemoteProxy {
         mut request: Request<Incoming>,
     ) -> Result<Response<Full<Bytes>>> {
         let now = Instant::now();
-        let info = Info::parse(&mut request, &self.decryptor)?;
+        let info = Info::parse(&mut request, &self.cipher)?;
         debug!("parsed info {:?}", info);
         let (parts, body) = request.into_parts();
         let body = body.collect().await?.to_bytes();
-        let body = self.decryptor.decrypt(&body)?;
+        let body = self.cipher.decrypt(&body)?;
         let body = Bytes::from_owner(body);
         let id = info.id.clone();
 
@@ -119,18 +120,27 @@ impl RemoteProxy {
             }
         };
 
-        if let Some((request, start)) = request {
+        let response = if let Some((request, start)) = request {
+            debug!("transaction {id} committed, sending to target");
+            trace!("forward request: {request:?}");
             let response = self
                 .client
                 .execute(request)
                 .await
                 .context("target request error")?;
             info!("handle whole transaction {} cost {:?}", id, start.elapsed());
-            Ok(response.convert().await?)
+
+            // Use the new trait to encrypt the response
+            response
+                .convert(Encryptor(&self.cipher))
+                .await
+                .context("response encrypt and convert error")?
         } else {
             info!("handle single chunk cost {:?}", now.elapsed());
-            Ok(Response::default())
-        }
+            Response::default()
+        };
+        trace!("forward response header: {:?}", response.headers());
+        Ok(response)
     }
 }
 

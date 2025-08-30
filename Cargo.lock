@@ -980,7 +980,7 @@ dependencies = [
 [[package]]
 name = "misc"
 version = "0.9.4"
-source = "git+http://172.29.3.68:3000/raven/misc.git#3b01277611a3bd14417c3f334b345bd663a2491e"
+source = "git+https://github.com/avalon1610/misc.git#3b01277611a3bd14417c3f334b345bd663a2491e"
 dependencies = [
  "anyhow",
  "time",

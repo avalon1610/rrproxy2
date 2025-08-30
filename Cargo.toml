@@ -31,7 +31,7 @@ version = "0.1"
 features = ["tokio", "server", "http1", "http2"]
 
 [dependencies.misc]
-git = "http://172.29.3.68:3000/raven/misc.git"
+git = "https://github.com/avalon1610/misc.git"
 features = ["tracing_logger"]
 
 [dev-dependencies]

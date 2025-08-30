@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Result};
 use http_body_util::Full;
 use hyper::{
     Request, Response,
@@ -56,7 +56,6 @@ where
     }
 }
 
-/// use fake name here, decrease request fingerprint
 pub const CHUNK_INDEX_HEADER: &str = "X-Fetch-Id";
 pub const TRANSACTION_ID_HEADER: &str = "X-Request-Id";
 /// this header should be encrypted, process is
@@ -65,24 +64,4 @@ pub const TRANSACTION_ID_HEADER: &str = "X-Request-Id";
 /// 3. encoded using base64
 pub const ORIGINAL_URL_HEADER: &str = "X-Referer";
 pub const TOTAL_CHUNKS_HEADER: &str = "X-Robots-Tag";
-
-pub trait HyperConverter {
-    async fn convert(self) -> Result<Response<Full<Bytes>>>;
-}
-
-impl HyperConverter for reqwest::Response {
-    async fn convert(self) -> Result<Response<Full<Bytes>>> {
-        let mut res = Response::builder()
-            .status(self.status())
-            .version(self.version());
-        if let Some(headers) = res.headers_mut() {
-            *headers = self.headers().clone();
-        }
-
-        let res = res
-            .body(Full::new(self.bytes().await?))
-            .map_err(|e| anyhow!("failed to convert response: {e:?}"))?;
-
-        Ok(res)
-    }
-}
+pub const CONTENT_TYPE_HEADER: &str = "X-Content-Type";

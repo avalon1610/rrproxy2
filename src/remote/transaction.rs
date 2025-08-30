@@ -40,10 +40,15 @@ impl Transaction {
 
         let method = (&*self.info.method).try_into()?;
         let url = self.info.url.parse()?;
-        let version = self.info.version.parse_version()?;
+        let _version = self.info.version.parse_version()?;
 
         let mut request = Request::new(method, url);
-        *request.version_mut() = version;
+        // *request.version_mut() = version;
+
+        // use HTTP/1.0 make server will not return with "transfer-encoding": "chunked", which do not support yet
+        // FIXME: remove this when chunked transfer is supported
+        *request.version_mut() = Version::HTTP_10;
+
         let headers = request.headers_mut();
         headers.extend(self.headers);
 
@@ -53,8 +58,17 @@ impl Transaction {
         });
 
         // adjust content-type and content-length headers
-        headers.insert(CONTENT_TYPE, self.info.content_type.parse()?);
-        headers.insert(CONTENT_LENGTH, body.len().to_string().parse()?);
+        if self.info.content_type.is_empty() {
+            headers.remove(CONTENT_TYPE);
+        } else {
+            headers.insert(CONTENT_TYPE, self.info.content_type.parse()?);
+        }
+
+        if body.is_empty() {
+            headers.remove(CONTENT_LENGTH);
+        } else {
+            headers.insert(CONTENT_LENGTH, body.len().to_string().parse()?);
+        }
 
         *request.body_mut() = Some(body.into());
         Ok(TransactionState::Committed((request, self.start)))

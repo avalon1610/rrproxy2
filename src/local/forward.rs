@@ -1,10 +1,10 @@
+use std::time::Instant;
+
 use crate::{
-    crypto::{Encryptor, default_token},
+    convert::{Decryptor, ResponseConverter},
+    crypto::{Cipher, default_token},
     options::LocalModeOptions,
-    proxy::{
-        CHUNK_INDEX_HEADER, HyperConverter, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER,
-        TRANSACTION_ID_HEADER,
-    },
+    proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
@@ -113,6 +113,7 @@ impl Forwarder {
         let mut headers = HeaderMap::new();
         headers.insert("User-Agent", USER_AGENT.parse()?);
         let uuid = Uuid::new_v4().to_string();
+        let now = Instant::now();
         debug!("begin transaction {}", uuid);
         headers.insert(TRANSACTION_ID_HEADER, uuid.parse()?);
         let content_type = self
@@ -129,10 +130,10 @@ impl Forwarder {
         );
         debug!("build original info: {info}");
 
-        let encryptor = Encryptor::new(self.token);
+        let cipher = Cipher::new(&self.token);
         headers.insert(
             ORIGINAL_URL_HEADER,
-            Base64::encode_string(&encryptor.encrypt(info)?).parse()?,
+            Base64::encode_string(&cipher.encrypt(info)?).parse()?,
         );
 
         for (key, value) in self.parts.headers.iter() {
@@ -145,7 +146,7 @@ impl Forwarder {
         let mut last_response = None;
         for (index, chunk) in self.chunks.into_iter().enumerate() {
             headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
-            let chunk = encryptor.encrypt(chunk)?;
+            let chunk = cipher.encrypt(chunk)?;
 
             // we need reset the Content-Length and Content-Type headers
             headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
@@ -174,12 +175,17 @@ impl Forwarder {
         let last_response =
             last_response.ok_or_else(|| anyhow!("no response for {uuid}, {}", self.parts.uri))?;
         debug!(
-            "end transaction {}, last response status: {}",
+            "end transaction {}, last response status: {}, cost {:?}",
             uuid,
-            last_response.status()
+            last_response.status(),
+            now.elapsed()
         );
 
-        last_response.convert().await
+        // Use the existing cipher instance to decrypt the response
+        last_response
+            .convert(Decryptor(&cipher))
+            .await
+            .context("response decrypt and convert error")
     }
 
     fn build_full_url(&self, parts: &Parts) -> Result<Uri> {
