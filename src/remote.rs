@@ -25,7 +25,7 @@ use std::{
 use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
-pub struct RemoteProxy {
+pub(crate) struct RemoteProxy {
     opts: Arc<RemoteModeOptions>,
     transactions: Arc<Mutex<HashMap<String, Transaction>>>,
     cipher: Arc<Cipher>,

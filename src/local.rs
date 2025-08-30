@@ -13,7 +13,7 @@ use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tracing::{info, warn};
 
 #[derive(Clone)]
-pub struct LocalProxy {
+pub(crate) struct LocalProxy {
     cm: Arc<CertManager>,
     opts: Arc<LocalModeOptions>,
 }

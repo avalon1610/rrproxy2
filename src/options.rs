@@ -6,17 +6,17 @@ use clap::Subcommand;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
-pub struct Options {
+pub(crate) struct Options {
     /// more verbose output, use -vv for even more verbose output
     #[arg(long, short, global = true, action = ArgAction::Count)]
-    pub verbose: u8,
+    pub(crate) verbose: u8,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub(crate) command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Commands {
+pub(crate) enum Commands {
     /// Run in local mode
     Local(LocalModeOptions),
     /// Run in remote mode
@@ -24,60 +24,60 @@ pub enum Commands {
 }
 
 #[derive(Debug, Parser)]
-pub struct CommonOptions {
+pub(crate) struct CommonOptions {
     /// The address to listen on
     #[arg(long, short, default_value = "127.0.0.1:8080")]
-    pub listen: String,
+    pub(crate) listen: String,
 
     /// The optional proxy address to use between local and remote. The proxy address should starts with http://
     #[arg(short, long, short)]
-    pub proxy: Option<String>,
+    pub(crate) proxy: Option<String>,
 
     /// The token for encryption, if not set, will use default one
     #[arg(long, short)]
-    pub token: Option<String>,
+    pub(crate) token: Option<String>,
 }
 
 #[derive(Debug, Parser)]
-pub struct LocalModeOptions {
+pub(crate) struct LocalModeOptions {
     #[command(flatten)]
-    pub common: CommonOptions,
+    pub(crate) common: CommonOptions,
 
     /// The address to forward requests to, should starts with http://
     #[arg(long, short, default_value = "http://127.0.0.1:8081")]
-    pub remote: String,
+    pub(crate) remote: String,
 
     /// The size of the chunk to split for the large request
     #[arg(long, short, default_value_t = 10240)]
-    pub chunk: usize,
+    pub(crate) chunk: usize,
 
     /// The Root CA certificate file path
     #[arg(long, default_value = "cert.ca.pem")]
-    pub cert: PathBuf,
+    pub(crate) cert: PathBuf,
 
     /// The Root CA private key file path
     #[arg(long, default_value = "key.ca.pem")]
-    pub key: PathBuf,
+    pub(crate) key: PathBuf,
 
     /// Generate a new Root CA certificate and private key. cert and key path will be used.
     #[arg(short, long)]
-    pub generate_ca: bool,
+    pub(crate) generate_ca: bool,
 
     /// The common name for the Root CA certificate generation
     #[arg(long, default_value = "RRProxy Root CA")]
-    pub ca_common_name: String,
+    pub(crate) ca_common_name: String,
 
     /// The directory to cache the server certificate
     #[arg(long, default_value = "cert_cache")]
-    pub cache_dir: PathBuf,
+    pub(crate) cache_dir: PathBuf,
 }
 
 #[derive(Debug, Parser)]
-pub struct RemoteModeOptions {
+pub(crate) struct RemoteModeOptions {
     #[command(flatten)]
-    pub common: CommonOptions,
+    pub(crate) common: CommonOptions,
 
     /// generate an uuid token for encryption.
     #[arg(long, short)]
-    pub generate_token: bool,
+    pub(crate) generate_token: bool,
 }

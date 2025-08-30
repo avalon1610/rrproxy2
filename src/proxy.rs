@@ -13,7 +13,7 @@ use std::{convert::Infallible, net::SocketAddr};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
-pub trait Proxy: Clone
+pub(crate) trait Proxy: Clone
 where
     Self: Send + Sync + 'static,
 {
@@ -56,12 +56,12 @@ where
     }
 }
 
-pub const CHUNK_INDEX_HEADER: &str = "X-Fetch-Id";
-pub const TRANSACTION_ID_HEADER: &str = "X-Request-Id";
+pub(crate) const CHUNK_INDEX_HEADER: &str = "X-Fetch-Id";
+pub(crate) const TRANSACTION_ID_HEADER: &str = "X-Request-Id";
 /// this header should be encrypted, process is
 /// 1. combine: <original method>+<original_version>+<original url> (use plus(+) sign to separate)
 /// 2. encrypt the combined string
 /// 3. encoded using base64
-pub const ORIGINAL_URL_HEADER: &str = "X-Referer";
-pub const TOTAL_CHUNKS_HEADER: &str = "X-Robots-Tag";
-pub const CONTENT_TYPE_HEADER: &str = "X-Content-Type";
+pub(crate) const ORIGINAL_URL_HEADER: &str = "X-Referer";
+pub(crate) const TOTAL_CHUNKS_HEADER: &str = "X-Robots-Tag";
+pub(crate) const CONTENT_TYPE_HEADER: &str = "X-Content-Type";

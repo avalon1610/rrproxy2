@@ -5,14 +5,14 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-pub struct PreBuffered<S> {
+pub(crate) struct PreBuffered<S> {
     buffer: hyper::body::Bytes,
     pos: usize,
     inner: S,
 }
 
 impl<S> PreBuffered<S> {
-    pub fn new(buffer: hyper::body::Bytes, inner: S) -> Self {
+    pub(crate) fn new(buffer: hyper::body::Bytes, inner: S) -> Self {
         PreBuffered {
             buffer,
             pos: 0,

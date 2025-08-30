@@ -7,18 +7,18 @@ use base64ct::{Base64, Encoding};
 use hyper::{Request, body::Incoming};
 
 #[derive(Debug)]
-pub struct Info {
-    pub id: String,
-    pub url: String,
-    pub method: String,
-    pub version: String,
-    pub content_type: String,
-    pub chunk_index: usize,
-    pub total_chunks: usize,
+pub(crate) struct Info {
+    pub(crate) id: String,
+    pub(crate) url: String,
+    pub(crate) method: String,
+    pub(crate) version: String,
+    pub(crate) content_type: String,
+    pub(crate) chunk_index: usize,
+    pub(crate) total_chunks: usize,
 }
 
 impl Info {
-    pub fn parse(request: &mut Request<Incoming>, cipher: &Cipher) -> Result<Self> {
+    pub(crate) fn parse(request: &mut Request<Incoming>, cipher: &Cipher) -> Result<Self> {
         let headers = request.headers_mut();
 
         let id = headers

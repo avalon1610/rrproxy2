@@ -10,7 +10,7 @@ use tokio::fs::read;
 use tokio::fs::{create_dir_all, write};
 use tracing::{debug, warn};
 
-pub struct CertManager {
+pub(crate) struct CertManager {
     /// root ca certificate
     ca_cert_path: PathBuf,
     /// root ca private key
@@ -24,11 +24,11 @@ pub struct CertManager {
 }
 
 impl CertManager {
-    pub fn has_issuer(&self) -> bool {
+    pub(crate) fn has_issuer(&self) -> bool {
         self.ca_issuer.is_some()
     }
 
-    pub async fn new(
+    pub(crate) async fn new(
         cert: impl Into<PathBuf>,
         key: impl Into<PathBuf>,
         cache_dir: impl Into<PathBuf>,
@@ -63,7 +63,7 @@ impl CertManager {
     }
 
     /// generate the ca certificate and key into the given path
-    pub async fn generate_ca_file(&mut self, common_name: impl Into<String>) -> Result<()> {
+    pub(crate) async fn generate_ca_file(&mut self, common_name: impl Into<String>) -> Result<()> {
         let (ca_cert, ca_key) = self.generate_ca_pem(common_name).await?;
 
         write(&self.ca_cert_path, &ca_cert).await?;
@@ -71,7 +71,7 @@ impl CertManager {
         Ok(())
     }
 
-    pub async fn generate_srv_pem(
+    pub(crate) async fn generate_srv_pem(
         &self,
         common_name: impl Into<String>,
     ) -> Result<(String, String)> {
@@ -162,7 +162,7 @@ impl CertManager {
         Ok((cert_pem, key_pem))
     }
 
-    pub async fn generate_ca_pem(
+    pub(crate) async fn generate_ca_pem(
         &mut self,
         common_name: impl Into<String>,
     ) -> Result<(String, String)> {
@@ -193,7 +193,7 @@ impl CertManager {
         Ok((cert_pem, key_pem))
     }
 
-    pub async fn clear_cache(&self) {
+    pub(crate) async fn clear_cache(&self) {
         if self.cache_dir.exists() {
             let mut dir = match tokio::fs::read_dir(&self.cache_dir).await {
                 Ok(dir) => dir,
@@ -234,21 +234,21 @@ impl From<CertConfig> for DistinguishedName {
 #[allow(dead_code)]
 struct CertConfig {
     /// common name for the certificate (typically for the domain)
-    pub common_name: String,
+    pub(crate) common_name: String,
     /// subject alternative names (additional domains/IPs)
-    pub san_domains: Vec<String>,
+    pub(crate) san_domains: Vec<String>,
     /// organization name
-    pub organization: String,
+    pub(crate) organization: String,
     /// country name
-    pub country: String,
+    pub(crate) country: String,
     /// state/province name
-    pub state: String,
+    pub(crate) state: String,
     /// city name
-    pub city: String,
+    pub(crate) city: String,
     /// organization unit name
-    pub org_unit: String,
+    pub(crate) org_unit: String,
     /// validity period in days
-    pub validity_days: u32,
+    pub(crate) validity_days: u32,
 }
 
 impl Default for CertConfig {

@@ -19,7 +19,7 @@ use reqwest::Proxy;
 use tracing::debug;
 use uuid::Uuid;
 
-pub struct Forwarder {
+pub(crate) struct Forwarder {
     chunks: Vec<Bytes>,
     remote_addr: String,
     client: reqwest::Client,
@@ -29,7 +29,7 @@ pub struct Forwarder {
 }
 
 impl Forwarder {
-    pub async fn new(
+    pub(crate) async fn new(
         req: Request<Incoming>,
         opts: &LocalModeOptions,
         is_https: bool,
@@ -109,7 +109,7 @@ impl Forwarder {
         })
     }
 
-    pub async fn apply(self) -> Result<Response<Full<Bytes>>> {
+    pub(crate) async fn apply(self) -> Result<Response<Full<Bytes>>> {
         let mut headers = HeaderMap::new();
         headers.insert("User-Agent", USER_AGENT.parse()?);
         let uuid = Uuid::new_v4().to_string();

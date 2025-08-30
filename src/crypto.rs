@@ -2,22 +2,22 @@ use anyhow::Result;
 use anyhow::anyhow;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadMutInPlace};
 
-pub struct Cipher {
+pub(crate) struct Cipher {
     key: [u8; 32],
     nonce: [u8; 12],
     associated_data: Vec<u8>,
 }
 
-pub fn default_token() -> String {
+pub(crate) fn default_token() -> String {
     package_info()
 }
 
-pub fn package_info() -> String {
+pub(crate) fn package_info() -> String {
     format!("{}-{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
 }
 
 impl Cipher {
-    pub fn new(key: impl AsRef<str>) -> Self {
+    pub(crate) fn new(key: impl AsRef<str>) -> Self {
         let key = key.as_ref().as_bytes();
         let key: [u8; 32] = blake3::hash(key).into();
         let associated_data = package_info().into_bytes();
@@ -29,7 +29,7 @@ impl Cipher {
         }
     }
 
-    pub fn encrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+    pub(crate) fn encrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         let data = data.as_ref();
         let mut buffer = Vec::new();
         buffer.extend_from_slice(data);
@@ -42,7 +42,7 @@ impl Cipher {
         Ok(buffer)
     }
 
-    pub fn decrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+    pub(crate) fn decrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         let mut buffer = Vec::new();
         buffer.extend_from_slice(data.as_ref());
 

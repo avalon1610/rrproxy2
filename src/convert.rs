@@ -8,15 +8,15 @@ use hyper::{HeaderMap, Response};
 
 /// Trait for response conversion between reqwest and hyper formats
 /// Handles both conversion and encryption/decryption of response bodies
-pub trait ResponseConverter {
+pub(crate) trait ResponseConverter {
     /// Convert reqwest response to hyper response with encryption/decryption
     async fn convert<C: CipherHelper>(self, cipher: C) -> Result<Response<Full<Bytes>>>;
 }
 
-pub struct Decryptor<'a>(pub &'a Cipher);
-pub struct Encryptor<'a>(pub &'a Cipher);
+pub(crate) struct Decryptor<'a>(pub(crate) &'a Cipher);
+pub(crate) struct Encryptor<'a>(pub(crate) &'a Cipher);
 
-pub trait CipherHelper {
+pub(crate) trait CipherHelper {
     fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>>;
 
     fn adjust_content_type(headers: &mut HeaderMap) -> Result<()>;
@@ -31,8 +31,9 @@ impl CipherHelper for Decryptor<'_> {
         let original = headers
             .get(CONTENT_TYPE_HEADER)
             .ok_or_else(|| anyhow!("No original content type header"))?;
-
-        headers.insert(CONTENT_TYPE, original.clone());
+        if !original.is_empty() {
+            headers.insert(CONTENT_TYPE, original.clone());
+        }
         Ok(())
     }
 }

@@ -8,15 +8,15 @@ use reqwest::Request;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-pub struct Transaction {
+pub(crate) struct Transaction {
     headers: HeaderMap,
     info: Info,
     cache: BTreeMap<usize, Bytes>,
-    pub start: Instant,
+    pub(crate) start: Instant,
 }
 
 impl Transaction {
-    pub fn new(parts: Parts, body: Bytes, info: Info) -> Self {
+    pub(crate) fn new(parts: Parts, body: Bytes, info: Info) -> Self {
         let headers = parts.headers;
         let mut cache = BTreeMap::new();
         cache.insert(info.chunk_index, body);
@@ -29,11 +29,11 @@ impl Transaction {
         }
     }
 
-    pub fn update(&mut self, chunk_index: usize, body: Bytes) {
+    pub(crate) fn update(&mut self, chunk_index: usize, body: Bytes) {
         self.cache.insert(chunk_index, body);
     }
 
-    pub fn commit(self) -> Result<TransactionState> {
+    pub(crate) fn commit(self) -> Result<TransactionState> {
         if self.cache.len() < self.info.total_chunks {
             return Ok(TransactionState::Pending(self));
         }
@@ -71,7 +71,7 @@ impl Transaction {
     }
 }
 
-pub enum TransactionState {
+pub(crate) enum TransactionState {
     Pending(Transaction),
     Committed((Request, Instant)),
 }
