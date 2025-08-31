@@ -6,9 +6,81 @@ use rcgen::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::read;
 use tokio::fs::{create_dir_all, write};
 use tracing::{debug, warn};
+
+const MAX_CACHE_SIZE: usize = 2048;
+
+/// Cache entry with timestamp for LRU tracking
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    cert: String,
+    key: String,
+    last_used: u64, // Unix timestamp in seconds
+}
+
+/// LRU cache for certificate entries using timestamps
+#[derive(Debug)]
+struct CertCache {
+    /// HashMap for O(1) access to certificate data
+    entries: HashMap<String, CacheEntry>,
+}
+
+impl CertCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Get current timestamp in seconds
+    fn current_timestamp() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn get(&mut self, key: &str) -> Option<(String, String)> {
+        if let Some(entry) = self.entries.get_mut(key) {
+            // Update timestamp to mark as recently accessed
+            entry.last_used = Self::current_timestamp();
+            Some((entry.cert.clone(), entry.key.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn insert(&mut self, key: String, value: (String, String)) {
+        // If cache is full and key doesn't exist, remove oldest entry
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_CACHE_SIZE {
+            self.remove_oldest();
+        }
+
+        // Insert/update the entry with current timestamp
+        let entry = CacheEntry {
+            cert: value.0,
+            key: value.1,
+            last_used: Self::current_timestamp(),
+        };
+        self.entries.insert(key, entry);
+    }
+
+    /// Remove the oldest (least recently used) entry from the cache
+    fn remove_oldest(&mut self) {
+        if let Some((oldest_key, _)) = self
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(k, v)| (k.clone(), v.clone()))
+        {
+            self.entries.remove(&oldest_key);
+            debug!("Removed oldest cache entry: {}", oldest_key);
+        }
+    }
+}
 
 pub(crate) struct CertManager {
     /// root ca certificate
@@ -19,8 +91,8 @@ pub(crate) struct CertManager {
     cache_dir: PathBuf,
     /// root ca certificate
     ca_issuer: Option<Issuer<'static, KeyPair>>,
-    /// memory cache
-    cache: Mutex<HashMap<String, (String, String)>>,
+    /// memory cache with LRU eviction
+    cache: Mutex<CertCache>,
 }
 
 impl CertManager {
@@ -58,7 +130,7 @@ impl CertManager {
             key_cert_path: key,
             cache_dir,
             ca_issuer,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(CertCache::new()),
         })
     }
 
@@ -81,7 +153,7 @@ impl CertManager {
         // Check memory cache first
         if let Some(cached) = self.cache.lock().unwrap().get(&common_name) {
             debug!("return {} cert from memory cache", common_name);
-            return Ok(cached.clone());
+            return Ok(cached);
         }
 
         // Generate hash for disk cache filenames
@@ -231,10 +303,10 @@ impl From<CertConfig> for DistinguishedName {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct CertConfig {
     /// common name for the certificate (typically for the domain)
     pub(crate) common_name: String,
+    #[allow(dead_code)]
     /// subject alternative names (additional domains/IPs)
     pub(crate) san_domains: Vec<String>,
     /// organization name
@@ -281,7 +353,7 @@ mod tests {
             key_cert_path: PathBuf::from("/tmp/test_ca.key"),
             cache_dir: PathBuf::from("/tmp/cache"),
             ca_issuer: None,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(CertCache::new()),
         };
 
         let common_name = "Test CA";
@@ -618,7 +690,14 @@ mod tests {
         let (cert_pem1, key_pem1) = cert_manager.generate_srv_pem(common_name).await.unwrap();
 
         // Check that certificate is now in memory cache
-        assert!(cert_manager.cache.lock().unwrap().contains_key(common_name));
+        assert!(
+            cert_manager
+                .cache
+                .lock()
+                .unwrap()
+                .get(common_name)
+                .is_some()
+        );
 
         // Check that certificate files are written to disk cache
         let hash = blake3::hash(common_name.as_bytes());
@@ -652,6 +731,7 @@ mod tests {
                 .cache
                 .lock()
                 .unwrap()
+                .entries
                 .contains_key(common_name)
         );
     }
@@ -819,5 +899,106 @@ mod tests {
             }
             _ => "Unknown field".to_string(),
         }
+    }
+
+    #[test]
+    fn test_cert_cache_lru_functionality() {
+        let mut cache = CertCache::new();
+
+        // Test basic insertion and retrieval
+        cache.insert("a".to_string(), ("cert_a".to_string(), "key_a".to_string()));
+        cache.insert("b".to_string(), ("cert_b".to_string(), "key_b".to_string()));
+        cache.insert("c".to_string(), ("cert_c".to_string(), "key_c".to_string()));
+
+        // Access 'a' to make it most recent
+        assert_eq!(
+            cache.get("a"),
+            Some(("cert_a".to_string(), "key_a".to_string()))
+        );
+
+        // Test basic functionality
+        assert_eq!(
+            cache.get("b"),
+            Some(("cert_b".to_string(), "key_b".to_string()))
+        );
+        assert_eq!(
+            cache.get("c"),
+            Some(("cert_c".to_string(), "key_c".to_string()))
+        );
+        assert_eq!(cache.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_cert_cache_size_limit() {
+        // Test with a smaller cache to make testing faster and more reliable
+        // We'll test the logic with just 3 entries instead of 2048
+        let mut cache = CertCache::new();
+
+        // Insert 3 entries with distinct timestamps
+        cache.insert(
+            "key1".to_string(),
+            ("cert1".to_string(), "key1".to_string()),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        cache.insert(
+            "key2".to_string(),
+            ("cert2".to_string(), "key2".to_string()),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        cache.insert(
+            "key3".to_string(),
+            ("cert3".to_string(), "key3".to_string()),
+        );
+
+        // Verify we have 3 entries
+        assert_eq!(cache.entries.len(), 3);
+
+        // Access key1 to make it most recent
+        assert_eq!(
+            cache.get("key1"),
+            Some(("cert1".to_string(), "key1".to_string()))
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Manually test the remove_oldest functionality by temporarily increasing cache to full
+        // Fill cache to MAX_CACHE_SIZE
+        for i in 4..MAX_CACHE_SIZE + 1 {
+            cache.insert(
+                format!("key{}", i),
+                (format!("cert{}", i), format!("key{}", i)),
+            );
+        }
+
+        // Now we should have MAX_CACHE_SIZE entries
+        assert_eq!(cache.entries.len(), MAX_CACHE_SIZE);
+
+        // key1 should still exist (was recently accessed)
+        assert_eq!(
+            cache.get("key1"),
+            Some(("cert1".to_string(), "key1".to_string()))
+        );
+
+        // Insert one more entry, which should evict the oldest
+        cache.insert(
+            "new_key".to_string(),
+            ("new_cert".to_string(), "new_key".to_string()),
+        );
+
+        // Cache should still have MAX_CACHE_SIZE entries
+        assert_eq!(cache.entries.len(), MAX_CACHE_SIZE);
+
+        // key1 should still exist (was recently accessed)
+        assert_eq!(
+            cache.get("key1"),
+            Some(("cert1".to_string(), "key1".to_string()))
+        );
+
+        // new_key should exist
+        assert_eq!(
+            cache.get("new_key"),
+            Some(("new_cert".to_string(), "new_key".to_string()))
+        );
     }
 }
