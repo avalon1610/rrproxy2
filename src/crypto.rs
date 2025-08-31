@@ -1,10 +1,10 @@
 use anyhow::Result;
 use anyhow::anyhow;
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadMutInPlace};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+use rand::RngCore;
 
 pub(crate) struct Cipher {
     key: [u8; 32],
-    nonce: [u8; 12],
     associated_data: Vec<u8>,
 }
 
@@ -23,7 +23,6 @@ impl Cipher {
         let associated_data = package_info().into_bytes();
 
         Cipher {
-            nonce: key[..12].try_into().unwrap(), // this unwrap is safe because we know that the slice has the correct length
             key,
             associated_data,
         }
@@ -31,27 +30,48 @@ impl Cipher {
 
     pub(crate) fn encrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         let data = data.as_ref();
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(data);
+        
+        // Generate a random nonce for each encryption
+        let mut nonce = [0u8; 12];
+        rand::rng().fill_bytes(&mut nonce);
+        
+        let cipher = ChaCha20Poly1305::new(&self.key.into());
+        let ciphertext = cipher
+            .encrypt(&nonce.into(), &[&self.associated_data, data].concat()[..])
+            .map_err(|e| anyhow!("encryption error: {e:?}"))?;
 
-        let mut cipher = ChaCha20Poly1305::new(&self.key.into());
-        cipher
-            .encrypt_in_place(&self.nonce.into(), &self.associated_data, &mut buffer)
-            .map_err(|e| anyhow!("encrypt in replace error: {e:?}"))?;
-
-        Ok(buffer)
+        // Prepend nonce to ciphertext
+        let mut result = Vec::with_capacity(12 + ciphertext.len());
+        result.extend_from_slice(&nonce);
+        result.extend_from_slice(&ciphertext);
+        
+        Ok(result)
     }
 
     pub(crate) fn decrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        buffer.extend_from_slice(data.as_ref());
+        let data = data.as_ref();
+        
+        if data.len() < 12 {
+            return Err(anyhow!("Data too short to contain nonce"));
+        }
+        
+        // Extract nonce from the beginning
+        let (nonce_bytes, ciphertext) = data.split_at(12);
+        let nonce: [u8; 12] = nonce_bytes.try_into()
+            .map_err(|_| anyhow!("Invalid nonce length"))?;
+        
+        let cipher = ChaCha20Poly1305::new(&self.key.into());
+        let plaintext = cipher
+            .decrypt(&nonce.into(), ciphertext)
+            .map_err(|e| anyhow!("decryption error: {e:?}"))?;
 
-        let mut cipher = ChaCha20Poly1305::new(&self.key.into());
-        cipher
-            .decrypt_in_place(&self.nonce.into(), &self.associated_data, &mut buffer)
-            .map_err(|e| anyhow!("decrypt in place error: {e:?}"))?;
-
-        Ok(buffer)
+        // Remove associated data from plaintext
+        if plaintext.len() < self.associated_data.len() {
+            return Err(anyhow!("Decrypted data too short"));
+        }
+        
+        let actual_data = &plaintext[self.associated_data.len()..];
+        Ok(actual_data.to_vec())
     }
 }
 
@@ -114,18 +134,5 @@ mod tests {
 
         // Decryption should fail for invalid data
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_consistent_encryption() {
-        let cipher = Cipher::new("consistent-key");
-        let original_data = b"Consistent test data";
-
-        // Encrypt the same data twice
-        let encrypted_data1 = cipher.encrypt(original_data).expect("Encryption failed");
-        let encrypted_data2 = cipher.encrypt(original_data).expect("Encryption failed");
-
-        // With the same key and nonce, encryption should be consistent
-        assert_eq!(encrypted_data1, encrypted_data2);
     }
 }

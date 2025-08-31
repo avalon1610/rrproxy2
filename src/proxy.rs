@@ -9,7 +9,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
 };
-use std::{convert::Infallible, net::SocketAddr};
+use std::{convert::Infallible, net::SocketAddr, future::Future};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 

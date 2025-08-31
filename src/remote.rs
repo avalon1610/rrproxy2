@@ -99,9 +99,22 @@ impl RemoteProxy {
 
         let request = {
             let mut transactions = self.transactions.lock().unwrap();
+            
+            // Check if transaction already exists and handle race conditions
             let transaction = if let Some(mut t) = transactions.remove(&id) {
                 // old transaction, we update the body and chunk index
                 debug!("transaction {id} updated {} bytes", body.len());
+                
+                // Validate chunk index to prevent duplicate chunks
+                if t.has_chunk(info.chunk_index) {
+                    warn!("Duplicate chunk received for transaction {}: chunk {}", id, info.chunk_index);
+                    transactions.insert(id.clone(), t); // Put it back
+                    return Ok(Response::builder()
+                        .status(400)
+                        .body("Duplicate chunk".into())
+                        .unwrap()); // unwrap is safe here
+                }
+                
                 t.update(info.chunk_index, body);
                 t
             } else {

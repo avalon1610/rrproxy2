@@ -33,6 +33,10 @@ impl Transaction {
         self.cache.insert(chunk_index, body);
     }
 
+    pub(crate) fn has_chunk(&self, chunk_index: usize) -> bool {
+        self.cache.contains_key(&chunk_index)
+    }
+
     pub(crate) fn commit(self) -> Result<TransactionState> {
         if self.cache.len() < self.info.total_chunks {
             return Ok(TransactionState::Pending(self));
