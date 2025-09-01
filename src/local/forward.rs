@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::{
     convert::{Decryptor, ResponseConverter},
-    crypto::{Cipher, default_token},
+    crypto::{Cipher, default_token, package_info},
     options::LocalModeOptions,
     proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
 };
@@ -16,7 +16,7 @@ use hyper::{
     http::request::Parts,
 };
 use reqwest::Proxy;
-use tracing::debug;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 pub(crate) struct Forwarder {
@@ -66,20 +66,29 @@ impl Forwarder {
             body.len()
         };
 
+        // because we use ChaCha20-Poly1305, the encrypted chunk size will be increased by
+        // - 12 (nonce length) 
+        // - 16 (authentication tag length)
+        // - and the associated data length
+        let chunk_size = chunk_size - 12 - 16 - package_info().len();
         let chunks = if length > chunk_size {
             // split the body into chunks, if length is larger than chunk size.
             // but we use random real chunk size (which all smaller than the config chunk size),
             // this decreases the fingerprint of the request.
             let mut chunks = vec![];
-            let low = (chunk_size as f32 * 0.8) as usize;
+            let low = (chunk_size as f32 * 0.5) as usize;
             loop {
                 if body.is_empty() {
                     break;
                 }
 
                 let real_chunk_size = rand::random_range(low..chunk_size);
-                let real_chunk_size = real_chunk_size.min(body.len());
-                chunks.push(body.split_to(real_chunk_size));
+                if body.len() < chunk_size {
+                    chunks.push(body);
+                    break;
+                } else {
+                    chunks.push(body.split_to(real_chunk_size));
+                }
             }
 
             chunks
@@ -114,7 +123,7 @@ impl Forwarder {
         headers.insert("User-Agent", USER_AGENT.parse()?);
         let uuid = Uuid::new_v4().to_string();
         let now = Instant::now();
-        debug!("begin transaction {}", uuid);
+        info!("begin transaction {}", uuid);
         headers.insert(TRANSACTION_ID_HEADER, uuid.parse()?);
         let content_type = self
             .parts
@@ -174,7 +183,7 @@ impl Forwarder {
 
         let last_response =
             last_response.ok_or_else(|| anyhow!("no response for {uuid}, {}", self.parts.uri))?;
-        debug!(
+        info!(
             "end transaction {}, last response status: {}, cost {:?}",
             uuid,
             last_response.status(),
