@@ -93,13 +93,22 @@ impl RemoteProxy {
         let info = Info::parse(&mut request, &self.cipher)?;
         let (parts, body) = request.into_parts();
         let body = body.collect().await?.to_bytes();
-        debug!("parsed info {:?} body len: {}", info, body.len());
+        debug!(
+            "[{}] parsed info {:?} body len: {}",
+            info.id,
+            info,
+            body.len()
+        );
 
         let body = if !body.is_empty() {
             let body = Base64::decode_vec(&String::from_utf8_lossy(&body))?;
-            let body = self.cipher.decrypt(&body).context("decrypt body error")?;
+            let body = self
+                .cipher
+                .decrypt(&body)
+                .with_context(|| format!("[{}] decrypt body error", info.id))?;
             Bytes::from_owner(body)
         } else {
+            debug!("[{}] empty body", info.id);
             body
         };
 
@@ -110,13 +119,13 @@ impl RemoteProxy {
             // Check if transaction already exists and handle race conditions
             let transaction = if let Some(mut t) = transactions.remove(&id) {
                 // old transaction, we update the body and chunk index
-                debug!("transaction {id} updated {} bytes", body.len());
+                debug!("[{id}] transaction updated {} bytes", body.len());
 
                 // Validate chunk index to prevent duplicate chunks
                 if t.has_chunk(info.chunk_index) {
                     warn!(
-                        "Duplicate chunk received for transaction {}: chunk {}",
-                        id, info.chunk_index
+                        "[{}] Duplicate chunk received, chunk {}",
+                        info.id, info.chunk_index
                     );
                     transactions.insert(id.clone(), t); // Put it back
                     return Ok(Response::builder()
@@ -130,7 +139,7 @@ impl RemoteProxy {
             } else {
                 // new transaction, we use request's headers (which already removed our internal headers)
                 // and body (will be store in cache)
-                debug!("new transaction {id} created, {} bytes", body.len());
+                debug!("[{id}] new transaction created, {} bytes", body.len());
                 Transaction::new(parts, body, info)
             };
 
@@ -144,25 +153,27 @@ impl RemoteProxy {
         };
 
         let response = if let Some((request, start)) = request {
-            debug!("transaction {id} committed, sending to target");
-            trace!("forward request: {request:?}");
+            debug!("[{id}] transaction committed, sending to target");
+            trace!("[{id}] forward request header: {:?}", request.headers());
+
             let response = self
                 .client
                 .execute(request)
                 .await
                 .context("target request error")?;
-            info!("handle whole transaction {} cost {:?}", id, start.elapsed());
+            info!("[{id}] handle whole transaction cost {:?}", start.elapsed());
 
             // Use the new trait to encrypt the response
             response
-                .convert(Encryptor(&self.cipher))
+                .convert(Encryptor(&self.cipher), &id)
                 .await
-                .context("response encrypt and convert error")?
+                .with_context(|| format!("[{id}] response encrypt and convert error"))?
         } else {
-            info!("handle single chunk cost {:?}", now.elapsed());
+            info!("[{id}] handle single chunk cost {:?}", now.elapsed());
             Response::default()
         };
-        trace!("forward response header: {:?}", response.headers());
+        
+        trace!("[{id}] forward response header: {:?}", response.headers());
         Ok(response)
     }
 }

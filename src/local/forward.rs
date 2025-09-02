@@ -122,14 +122,14 @@ impl Forwarder {
     }
 
     pub(crate) async fn apply(self) -> Result<Response<Full<Bytes>>> {
-        let uuid = Uuid::new_v4().to_string();
+        let id = Uuid::new_v4().to_string();
         let url = self.build_full_url(&self.parts)?;
 
         let mut headers = self.parts.headers;
         headers.insert(USER_AGENT, DEFAULT_USER_AGENT.parse()?);
 
         let now = Instant::now();
-        info!("begin transaction {}", uuid);
+        info!("[{id}] transaction begins");
 
         // we need re-write the HOST header
         let remote_url: Uri = (self.remote_addr).parse()?;
@@ -137,7 +137,7 @@ impl Forwarder {
         headers.insert(HOST, host.parse()?);
 
         // set uuid for this transaction
-        headers.insert(TRANSACTION_ID_HEADER, uuid.parse()?);
+        headers.insert(TRANSACTION_ID_HEADER, id.parse()?);
 
         // get original content-type
         let content_type = headers
@@ -152,7 +152,7 @@ impl Forwarder {
         );
 
         let cipher = Cipher::new(&self.token);
-        debug!("build original info: {info}");
+        debug!("[{id}] build original info: {info}");
         headers.insert(
             ORIGINAL_URL_HEADER,
             Base64::encode_string(&cipher.encrypt(info)?).parse()?,
@@ -171,8 +171,8 @@ impl Forwarder {
 
             let request = if chunk.is_empty() {
                 debug!(
-                    "forwarding to {} [{}] with chunk index {} empty body",
-                    uuid, self.remote_addr, index
+                    "[{id}] forwarding to {} with chunk index {} empty body",
+                    self.remote_addr, index
                 );
                 headers.remove(CONTENT_LENGTH);
                 request
@@ -181,8 +181,7 @@ impl Forwarder {
                 let chunk = Base64::encode_string(&chunk);
 
                 debug!(
-                    "forwarding to {} [{}] with chunk index {} size {}",
-                    uuid,
+                    "[{id}] forwarding to {} with chunk index {} size {}",
                     self.remote_addr,
                     index,
                     chunk.len()
@@ -192,7 +191,7 @@ impl Forwarder {
                 request.body(chunk)
             };
             let request = request.headers(headers.clone()).build()?;
-            trace!("request headers: {:?}", request.headers(),);
+            trace!("[{id}] request headers: {:?}", request.headers());
 
             let response = self.client.execute(request).await?;
             if index == total - 1 {
@@ -201,19 +200,18 @@ impl Forwarder {
         }
 
         let last_response =
-            last_response.ok_or_else(|| anyhow!("no response for {uuid}, {}", self.parts.uri))?;
+            last_response.ok_or_else(|| anyhow!("no response for {id}, {}", self.parts.uri))?;
         info!(
-            "end transaction {}, last response status: {}, cost {:?}",
-            uuid,
+            "[{id}] transaction ends, last response status: {}, cost {:?}",
             last_response.status(),
             now.elapsed()
         );
 
         // Use the existing cipher instance to decrypt the response
         last_response
-            .convert(Decryptor(&cipher))
+            .convert(Decryptor(&cipher), &id)
             .await
-            .context("response decrypt and convert error")
+            .with_context(|| format!("[{id}] response decrypt and convert error"))
     }
 
     fn build_full_url(&self, parts: &Parts) -> Result<Uri> {

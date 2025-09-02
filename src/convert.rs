@@ -5,12 +5,17 @@ use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Response};
+use tracing::trace;
 
 /// Trait for response conversion between reqwest and hyper formats
 /// Handles both conversion and encryption/decryption of response bodies
 pub(crate) trait ResponseConverter {
     /// Convert reqwest response to hyper response with encryption/decryption
-    async fn convert<C: CipherHelper>(self, cipher: C) -> Result<Response<Full<Bytes>>>;
+    async fn convert<C: CipherHelper>(
+        self,
+        cipher: C,
+        id: impl AsRef<str>,
+    ) -> Result<Response<Full<Bytes>>>;
 }
 
 pub(crate) struct Decryptor<'a>(pub(crate) &'a Cipher);
@@ -67,14 +72,19 @@ impl CipherHelper for Encryptor<'_> {
 }
 
 impl ResponseConverter for reqwest::Response {
-    async fn convert<C: CipherHelper>(self, cipher: C) -> Result<Response<Full<Bytes>>> {
+    async fn convert<C: CipherHelper>(
+        self,
+        cipher: C,
+        id: impl AsRef<str>,
+    ) -> Result<Response<Full<Bytes>>> {
+        let id = id.as_ref();
         let status = self.status();
         let version = self.version();
         let mut headers = self.headers().clone();
         let body_bytes = self.bytes().await?;
 
-        tracing::trace!(
-            "convert response body len: {}\ncontent: {}",
+        trace!(
+            "[{id}] convert response body len: {}\n{}",
             body_bytes.len(),
             str::from_utf8(&body_bytes).unwrap_or("<binary>")
         );
@@ -85,7 +95,10 @@ impl ResponseConverter for reqwest::Response {
             let body = match cipher.process(&body_bytes) {
                 Ok(data) => Bytes::from(data),
                 Err(e) => {
-                    bail!("Failed to process response body: {e:?} by {}", C::name());
+                    bail!(
+                        "[{id}] Failed to process response body: {e:?} by {}",
+                        C::name()
+                    );
                 }
             };
 
