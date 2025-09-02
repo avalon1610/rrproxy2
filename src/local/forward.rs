@@ -5,14 +5,15 @@ use crate::{
     crypto::{Cipher, default_token, package_info},
     options::LocalModeOptions,
     proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
+    remote::HostEx,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
 use http_body_util::{BodyExt, Full};
 use hyper::{
-    HeaderMap, Request, Response, Uri,
+    Request, Response, Uri,
     body::{Bytes, Incoming},
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, USER_AGENT},
     http::request::Parts,
 };
 use reqwest::Proxy;
@@ -67,10 +68,12 @@ impl Forwarder {
         };
 
         // because we use ChaCha20-Poly1305, the encrypted chunk size will be increased by
-        // - 12 (nonce length) 
+        // - 12 (nonce length)
         // - 16 (authentication tag length)
         // - and the associated data length
         let chunk_size = chunk_size - 12 - 16 - package_info().len();
+        // use Base64 will increase the size
+        let chunk_size = 3 * (chunk_size / 4);
         let chunks = if length > chunk_size {
             // split the body into chunks, if length is larger than chunk size.
             // but we use random real chunk size (which all smaller than the config chunk size),
@@ -119,35 +122,44 @@ impl Forwarder {
     }
 
     pub(crate) async fn apply(self) -> Result<Response<Full<Bytes>>> {
-        let mut headers = HeaderMap::new();
-        headers.insert("User-Agent", USER_AGENT.parse()?);
         let uuid = Uuid::new_v4().to_string();
+        let url = self.build_full_url(&self.parts)?;
+
+        let mut headers = self.parts.headers;
+        headers.insert(USER_AGENT, DEFAULT_USER_AGENT.parse()?);
+
         let now = Instant::now();
         info!("begin transaction {}", uuid);
+
+        // we need re-write the HOST header
+        let remote_url: Uri = (self.remote_addr).parse()?;
+        let host = remote_url.get_host()?;
+        headers.insert(HOST, host.parse()?);
+
+        // set uuid for this transaction
         headers.insert(TRANSACTION_ID_HEADER, uuid.parse()?);
-        let content_type = self
-            .parts
-            .headers
+
+        // get original content-type
+        let content_type = headers
             .get(CONTENT_TYPE)
             .map(|c| c.to_str().unwrap_or(""))
             .unwrap_or("");
-        let url = self.build_full_url(&self.parts)?;
 
+        // set the url info
         let info = format!(
             "{}+{:?}+{}+{}",
             self.parts.method, self.parts.version, content_type, url
         );
-        debug!("build original info: {info}");
 
         let cipher = Cipher::new(&self.token);
+        debug!("build original info: {info}");
         headers.insert(
             ORIGINAL_URL_HEADER,
             Base64::encode_string(&cipher.encrypt(info)?).parse()?,
         );
 
-        for (key, value) in self.parts.headers.iter() {
-            headers.insert(key.clone(), value.clone());
-        }
+        // reset content-type
+        headers.insert(CONTENT_TYPE, "text/plain".parse()?);
 
         let total = self.chunks.len();
         headers.insert(TOTAL_CHUNKS_HEADER, total.to_string().parse()?);
@@ -155,27 +167,32 @@ impl Forwarder {
         let mut last_response = None;
         for (index, chunk) in self.chunks.into_iter().enumerate() {
             headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
-            let chunk = cipher.encrypt(chunk)?;
+            let request = self.client.post(&self.remote_addr);
 
-            // we need reset the Content-Length and Content-Type headers
-            headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
-            headers.insert(CONTENT_TYPE, "application/octet-stream".parse()?);
-            debug!(
-                "forwarding to {} [{}] with chunk index {} size {}",
-                uuid,
-                self.remote_addr,
-                index,
-                chunk.len()
-            );
+            let request = if chunk.is_empty() {
+                debug!(
+                    "forwarding to {} [{}] with chunk index {} empty body",
+                    uuid, self.remote_addr, index
+                );
+                headers.remove(CONTENT_LENGTH);
+                request
+            } else {
+                let chunk = cipher.encrypt(chunk)?;
+                let chunk = Base64::encode_string(&chunk);
 
-            let response = self
-                .client
-                .post(&self.remote_addr)
-                .headers(headers.clone())
-                .body(chunk)
-                .send()
-                .await?;
+                debug!(
+                    "forwarding to {} [{}] with chunk index {} size {}",
+                    uuid,
+                    self.remote_addr,
+                    index,
+                    chunk.len()
+                );
+                // we need reset the Content-Length headers
+                headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
+                request.body(chunk)
+            };
 
+            let response = request.headers(headers.clone()).send().await?;
             if index == total - 1 {
                 last_response = Some(response);
             }
@@ -224,4 +241,4 @@ impl Forwarder {
 }
 
 // TODO: make this configurable
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";

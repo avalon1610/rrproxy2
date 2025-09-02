@@ -8,10 +8,11 @@ use crate::{
         transaction::{Transaction, TransactionState},
     },
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use base64ct::{Base64, Encoding};
 use http_body_util::{BodyExt, Full};
 use hyper::{
-    Request, Response,
+    Request, Response, Uri,
     body::{Bytes, Incoming},
 };
 use reqwest::{Client, ClientBuilder};
@@ -93,28 +94,36 @@ impl RemoteProxy {
         debug!("parsed info {:?}", info);
         let (parts, body) = request.into_parts();
         let body = body.collect().await?.to_bytes();
-        let body = self.cipher.decrypt(&body)?;
-        let body = Bytes::from_owner(body);
-        let id = info.id.clone();
+        let body = if !body.is_empty() {
+            let body = Base64::decode_vec(&String::from_utf8_lossy(&body))?;
+            let body = self.cipher.decrypt(&body)?;
+            Bytes::from_owner(body)
+        } else {
+            body
+        };
 
+        let id = info.id.clone();
         let request = {
             let mut transactions = self.transactions.lock().unwrap();
-            
+
             // Check if transaction already exists and handle race conditions
             let transaction = if let Some(mut t) = transactions.remove(&id) {
                 // old transaction, we update the body and chunk index
                 debug!("transaction {id} updated {} bytes", body.len());
-                
+
                 // Validate chunk index to prevent duplicate chunks
                 if t.has_chunk(info.chunk_index) {
-                    warn!("Duplicate chunk received for transaction {}: chunk {}", id, info.chunk_index);
+                    warn!(
+                        "Duplicate chunk received for transaction {}: chunk {}",
+                        id, info.chunk_index
+                    );
                     transactions.insert(id.clone(), t); // Put it back
                     return Ok(Response::builder()
                         .status(400)
                         .body("Duplicate chunk".into())
                         .unwrap()); // unwrap is safe here
                 }
-                
+
                 t.update(info.chunk_index, body);
                 t
             } else {
@@ -159,3 +168,18 @@ impl RemoteProxy {
 
 mod info;
 mod transaction;
+
+pub(crate) trait HostEx {
+    fn get_host(&self) -> Result<String>;
+}
+
+impl HostEx for Uri {
+    fn get_host(&self) -> Result<String> {
+        let host = self.host().ok_or_else(|| anyhow!("uri has not host"))?;
+        let port = self.port_u16();
+        Ok(format!(
+            "{host}{}",
+            port.map(|p| format!(":{}", p)).unwrap_or_default()
+        ))
+    }
+}

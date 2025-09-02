@@ -1,9 +1,10 @@
+use crate::remote::HostEx;
 use crate::remote::info::Info;
 use anyhow::Result;
 use hyper::body::Bytes;
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST};
 use hyper::http::request::Parts;
-use hyper::{HeaderMap, Version};
+use hyper::{HeaderMap, Uri, Version};
 use reqwest::Request;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -43,10 +44,11 @@ impl Transaction {
         }
 
         let method = (&*self.info.method).try_into()?;
-        let url = self.info.url.parse()?;
+        let url: Uri = self.info.url.parse()?;
+        let host = url.get_host()?;
         let version = self.info.version.parse_version()?;
 
-        let mut request = Request::new(method, url);
+        let mut request = Request::new(method, url.to_string().parse()?);
         *request.version_mut() = version;
 
         let headers = request.headers_mut();
@@ -56,6 +58,9 @@ impl Transaction {
             acc.extend_from_slice(chunk);
             acc
         });
+
+        // override host header
+        headers.insert(HOST, host.parse()?);
 
         // adjust content-type and content-length headers
         if self.info.content_type.is_empty() {

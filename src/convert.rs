@@ -20,9 +20,15 @@ pub(crate) trait CipherHelper {
     fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>>;
 
     fn adjust_content_type(headers: &mut HeaderMap) -> Result<()>;
+
+    fn name() -> &'static str;
 }
 
 impl CipherHelper for Decryptor<'_> {
+    fn name() -> &'static str {
+        "decryptor"
+    }
+
     fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         self.0.decrypt(data)
     }
@@ -39,6 +45,10 @@ impl CipherHelper for Decryptor<'_> {
 }
 
 impl CipherHelper for Encryptor<'_> {
+    fn name() -> &'static str {
+        "encryptor"
+    }
+
     fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         self.0.encrypt(data)
     }
@@ -63,6 +73,11 @@ impl ResponseConverter for reqwest::Response {
         let mut headers = self.headers().clone();
         let body_bytes = self.bytes().await?;
 
+        tracing::trace!(
+            "convert response body len: {}\ncontent: {}",
+            body_bytes.len(),
+            String::from_utf8_lossy(&body_bytes)
+        );
         // the response body if it's not empty
         let body = if body_bytes.is_empty() {
             body_bytes
@@ -70,7 +85,7 @@ impl ResponseConverter for reqwest::Response {
             let body = match cipher.process(&body_bytes) {
                 Ok(data) => Bytes::from(data),
                 Err(e) => {
-                    bail!("Failed to encrypt response body: {e:?}");
+                    bail!("Failed to process response body: {e:?} by {}", C::name());
                 }
             };
 
