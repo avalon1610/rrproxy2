@@ -76,7 +76,7 @@ impl ResponseConverter for reqwest::Response {
         tracing::trace!(
             "convert response body len: {}\ncontent: {}",
             body_bytes.len(),
-            String::from_utf8_lossy(&body_bytes)
+            str::from_utf8(&body_bytes).unwrap_or("<binary>")
         );
         // the response body if it's not empty
         let body = if body_bytes.is_empty() {
