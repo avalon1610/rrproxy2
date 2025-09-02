@@ -1,0 +1,75 @@
+name: Release Build
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-musl,x86_64-pc-windows-msvc
+    
+    - name: Install just
+      uses: extractions/setup-just@v2
+    
+    - name: Install cross-compilation tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools zip
+        cargo install cargo-xwin
+        
+    - name: Setup xwin for Windows cross-compilation
+      run: |
+        cargo xwin env
+        echo "CC_x86_64_pc_windows_msvc=clang-cl" >> $GITHUB_ENV
+        echo "CXX_x86_64_pc_windows_msvc=clang-cl" >> $GITHUB_ENV
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    
+    - name: Build release
+      run: just r
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rrproxy2-release
+        path: |
+          target/rrproxy2.exe
+          target/rrproxy2
+          target/rrproxy2.zip
+    
+    - name: Create Release
+      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        draft: false
+        prerelease: false
+        files: |
+          target/rrproxy2.exe
+          target/rrproxy2
+          target/rrproxy2.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
