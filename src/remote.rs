@@ -91,12 +91,13 @@ impl RemoteProxy {
     ) -> Result<Response<Full<Bytes>>> {
         let now = Instant::now();
         let info = Info::parse(&mut request, &self.cipher)?;
-        debug!("parsed info {:?}", info);
         let (parts, body) = request.into_parts();
         let body = body.collect().await?.to_bytes();
+        debug!("parsed info {:?} body len: {}", info, body.len());
+
         let body = if !body.is_empty() {
             let body = Base64::decode_vec(&String::from_utf8_lossy(&body))?;
-            let body = self.cipher.decrypt(&body)?;
+            let body = self.cipher.decrypt(&body).context("decrypt body error")?;
             Bytes::from_owner(body)
         } else {
             body

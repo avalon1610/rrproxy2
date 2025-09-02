@@ -57,7 +57,7 @@ impl Info {
             .with_context(|| format!("Invalid {TOTAL_CHUNKS_HEADER} header, not a number"))?;
 
         let url = Base64::decode_vec(url)?;
-        let url = cipher.decrypt(&url)?;
+        let url = cipher.decrypt(&url).context("decrypt url info error")?;
         let url = String::from_utf8_lossy(&url);
         let mut spans = url.split('+');
         let method = spans

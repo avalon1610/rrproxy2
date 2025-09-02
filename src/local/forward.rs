@@ -17,7 +17,7 @@ use hyper::{
     http::request::Parts,
 };
 use reqwest::Proxy;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 pub(crate) struct Forwarder {
@@ -191,8 +191,10 @@ impl Forwarder {
                 headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
                 request.body(chunk)
             };
+            let request = request.headers(headers.clone()).build()?;
+            trace!("request headers: {:?}", request.headers(),);
 
-            let response = request.headers(headers.clone()).send().await?;
+            let response = self.client.execute(request).await?;
             if index == total - 1 {
                 last_response = Some(response);
             }

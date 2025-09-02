@@ -9,6 +9,9 @@ release_windows:
 
 release_linux:
     cargo build -r --target=x86_64-unknown-linux-gnu
+    
+release_musl:
+    cargo build -r --target=x86_64-unknown-linux-musl
 
 release: release_linux release_windows
     cp target/x86_64-pc-windows-msvc/release/rrproxy2.exe target/rrproxy2.exe
@@ -19,4 +22,5 @@ alias dl := debug_local
 alias dr := debug_remote
 alias rw := release_windows
 alias rl := release_linux
+alias rm := release_musl
 alias r := release
