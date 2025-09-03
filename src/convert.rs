@@ -84,7 +84,8 @@ impl ResponseConverter for reqwest::Response {
         let body_bytes = self.bytes().await?;
 
         trace!(
-            "[{id}] convert response body len: {}\n{}",
+            "[{id}] convert original response headers: {:?} body len: {}\n{}",
+            headers,
             body_bytes.len(),
             str::from_utf8(&body_bytes).unwrap_or("<binary>")
         );
