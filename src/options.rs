@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-
 use clap::ArgAction;
 use clap::Parser;
 use clap::Subcommand;
@@ -50,6 +49,11 @@ pub(crate) struct LocalModeOptions {
     /// The size of the chunk to split for the large request
     #[arg(long, short, default_value_t = 10240)]
     pub(crate) chunk: usize,
+
+    /// make all data go through the remote server. 
+    /// by default, only large request (larger than chunk size) will go through the remote server
+    #[arg(long, short)]
+    pub(crate) full: bool,
 
     /// The Root CA certificate file path
     #[arg(long, default_value = "cert.ca.pem")]

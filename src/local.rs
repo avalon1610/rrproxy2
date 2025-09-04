@@ -1,13 +1,16 @@
 use crate::{
+    convert::{CipherHelper, ResponseConverter},
     local::{cert::CertManager, forward::Forwarder},
     options::LocalModeOptions,
     proxy::Proxy,
 };
-use anyhow::{Result, bail};
-use http_body_util::Full;
+use anyhow::{Context, Result, bail};
+use http_body_util::{BodyExt, Full};
 use hyper::{
-    Method, Request, Response,
-    body::{Bytes, Incoming},
+    Method, Request, Response, Uri,
+    body::{Body, Bytes, Incoming},
+    header::HOST,
+    http::request::Parts,
 };
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tracing::{info, warn};
@@ -79,11 +82,111 @@ impl LocalProxy {
         req: Request<Incoming>,
         is_https: bool,
     ) -> Result<Response<Full<Bytes>>> {
-        let forwarder = Forwarder::new(req, &self.opts, is_https).await?;
-        let response = forwarder.apply().await?;
+        let size_hint = req.body().size_hint();
+        tracing::debug!("size hint: {:?}", size_hint);
+        let response = if self.opts.full
+            || size_hint.lower() as usize > self.opts.chunk
+            || size_hint
+                .upper()
+                .map_or(false, |u| u as usize > self.opts.chunk)
+        {
+            let forwarder = Forwarder::new(req, &self.opts, is_https).await?;
+            forwarder.apply().await?
+        } else {
+            let client = new_client(&self.opts)?;
+            let req = client.convert(req, is_https).await?;
+            tracing::debug!("Direct request without forwarding: {}", req.url());
+
+            let response = client.execute(req).await?;
+            response.convert(Plain, "Direct").await?
+        };
 
         Ok(response)
     }
+}
+
+struct Plain;
+
+impl CipherHelper for Plain {
+    fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+        Ok(data.as_ref().to_vec())
+    }
+
+    fn adjust_content_type(_headers: &mut hyper::HeaderMap) -> Result<()> {
+        Ok(())
+    }
+
+    fn name() -> &'static str {
+        "Plain"
+    }
+}
+
+fn new_client(opts: &LocalModeOptions) -> Result<reqwest::Client> {
+    let client = reqwest::ClientBuilder::new()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true);
+    if let Some(proxy) = &opts.common.proxy {
+        Ok(client
+            .proxy(reqwest::Proxy::all(proxy).context("invalid proxy option")?)
+            .build()?)
+    } else {
+        // add no_proxy to make it not use http_proxy and https_proxy env variables
+        Ok(client.no_proxy().build()?)
+    }
+}
+
+trait RequestConvert {
+    async fn convert(
+        &self,
+        request: hyper::Request<Incoming>,
+        is_https: bool,
+    ) -> Result<reqwest::Request>;
+}
+
+impl RequestConvert for reqwest::Client {
+    async fn convert(
+        &self,
+        request: hyper::Request<Incoming>,
+        is_https: bool,
+    ) -> Result<reqwest::Request> {
+        let (parts, body) = request.into_parts();
+        let url: Uri = build_full_url(is_https, &parts)?;
+        let body = body.collect().await?.to_bytes();
+
+        let mut builder = self.request(parts.method, url.to_string());
+        for (key, value) in parts.headers {
+            if let Some(key) = key {
+                builder = builder.header(key, value);
+            }
+        }
+
+        Ok(builder.body(body).build()?)
+    }
+}
+
+fn build_full_url(is_https: bool, parts: &Parts) -> Result<Uri> {
+    if parts.uri.scheme().is_some() && parts.uri.authority().is_some() {
+        return Ok(parts.uri.clone());
+    }
+
+    let host = parts
+        .headers
+        .get(HOST)
+        .ok_or_else(|| anyhow::anyhow!("Can not get {HOST} header"))?
+        .to_str()?;
+
+    Ok(format!(
+        "{}://{}{}{}",
+        if is_https { "https" } else { "http" },
+        host,
+        parts.uri.path(),
+        if let Some(query) = parts.uri.query() {
+            format!("?{}", query)
+        } else {
+            "".to_owned()
+        }
+    )
+    .parse()?)
 }
 
 mod buf;

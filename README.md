@@ -64,6 +64,7 @@ The data flow in RRProxy follows a secure, multi-stage process designed for both
 - **Request Body Chunking**: Automatically splits large request bodies (>10KB) into smaller, randomly-sized chunks
 - **TLS Interception**: Dynamically generates certificates for HTTPS domains using a root CA
 - **End-to-End Encryption**: All proxy-to-proxy communication encrypted with ChaCha20-Poly1305
+- **Auto Decompression**: Automatically handles compressed content in responses
 
 ### Advanced Features  
 - **Configurable Chunk Size**: Adjust chunk size based on network constraints (default: 10KB)
@@ -350,6 +351,7 @@ src/
 ├── crypto.rs         # Encryption/decryption (ChaCha20-Poly1305)
 ├── local.rs          # Local proxy implementation
 ├── remote.rs         # Remote proxy implementation
+├── convert.rs        # Response conversion and compression handling
 ├── local/
 │   ├── buf.rs        # Buffer management for TLS
 │   ├── cert.rs       # Certificate generation and management
@@ -403,7 +405,24 @@ SOFTWARE.
 
 ## Changelog
 
-### Version 0.1.1 (Current)
+### Version 0.1.4 (Current)
+- Added auto decompression feature for responses
+- Improved logging and tracing capabilities
+- Enhanced chunk encoding handling
+- Updated dependencies and build workflow
+
+### Version 0.1.3
+- Improved TLS interception reliability
+- Fixed chunk size calculation after encryption
+- Enhanced error handling and logging
+
+### Version 0.1.2
+- Added intermediate proxy support
+- Improved certificate caching mechanism
+- Enhanced transaction management
+- Fixed several edge case bugs
+
+### Version 0.1.1
 - Initial release with basic proxy functionality
 - HTTP/HTTPS traffic interception
 - Request body chunking mechanism

@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::{
     convert::{Decryptor, ResponseConverter},
     crypto::{Cipher, default_token, package_info},
+    local::{build_full_url, new_client},
     options::LocalModeOptions,
     proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
     remote::HostEx,
@@ -16,7 +17,6 @@ use hyper::{
     header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, USER_AGENT},
     http::request::Parts,
 };
-use reqwest::Proxy;
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
@@ -99,18 +99,7 @@ impl Forwarder {
             vec![body]
         };
 
-        let client = reqwest::ClientBuilder::new()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true);
-        let client = if let Some(proxy) = &opts.common.proxy {
-            client
-                .proxy(Proxy::all(proxy).context("invalid proxy option")?)
-                .build()?
-        } else {
-            // add no_proxy to make it not use http_proxy and https_proxy env variables
-            client.no_proxy().build()?
-        };
-
+        let client = new_client(opts)?;
         Ok(Self {
             chunks,
             remote_addr,
@@ -123,7 +112,7 @@ impl Forwarder {
 
     pub(crate) async fn apply(self) -> Result<Response<Full<Bytes>>> {
         let id = Uuid::new_v4().to_string();
-        let url = self.build_full_url(&self.parts)?;
+        let url = build_full_url(self.is_https, &self.parts)?;
 
         let mut headers = self.parts.headers;
         headers.insert(USER_AGENT, DEFAULT_USER_AGENT.parse()?);
@@ -212,31 +201,6 @@ impl Forwarder {
             .convert(Decryptor(&cipher), &id)
             .await
             .with_context(|| format!("[{id}] response decrypt and convert error"))
-    }
-
-    fn build_full_url(&self, parts: &Parts) -> Result<Uri> {
-        if parts.uri.scheme().is_some() && parts.uri.authority().is_some() {
-            return Ok(parts.uri.clone());
-        }
-
-        let host = parts
-            .headers
-            .get(HOST)
-            .ok_or_else(|| anyhow!("Can not get {HOST} header"))?
-            .to_str()?;
-
-        Ok(format!(
-            "{}://{}{}{}",
-            if self.is_https { "https" } else { "http" },
-            host,
-            parts.uri.path(),
-            if let Some(query) = parts.uri.query() {
-                format!("?{}", query)
-            } else {
-                "".to_owned()
-            }
-        )
-        .parse()?)
     }
 }
 
