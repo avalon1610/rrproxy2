@@ -12,7 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
 use http_body_util::{BodyExt, Full};
 use hyper::{
-    Request, Response, Uri,
+    Response, Uri,
     body::{Bytes, Incoming},
     header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, USER_AGENT},
     http::request::Parts,
@@ -31,14 +31,14 @@ pub(crate) struct Forwarder {
 
 impl Forwarder {
     pub(crate) async fn new(
-        req: Request<Incoming>,
+        parts: Parts,
+        body: Incoming,
         opts: &LocalModeOptions,
         is_https: bool,
     ) -> Result<Self> {
         let chunk_size = opts.chunk;
         let remote_addr = opts.remote.clone();
 
-        let (parts, body) = req.into_parts();
         let mut body = body.collect().await?.to_bytes();
         if let Some(encoding) = parts.headers.get(TRANSFER_ENCODING) {
             // FIXME: Implement support for transfer encoding
@@ -99,7 +99,7 @@ impl Forwarder {
             vec![body]
         };
 
-        let client = new_client(opts)?;
+        let client = new_client(opts, false)?;
         Ok(Self {
             chunks,
             remote_addr,

@@ -1,6 +1,6 @@
 use crate::{
     convert::{CipherHelper, ResponseConverter},
-    local::{cert::CertManager, forward::Forwarder},
+    local::{bypass::Bypass, cert::CertManager, forward::Forwarder},
     options::LocalModeOptions,
     proxy::Proxy,
 };
@@ -13,12 +13,13 @@ use hyper::{
     http::request::Parts,
 };
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
-use tracing::{info, warn};
+use tracing::{info, trace, warn};
 
 #[derive(Clone)]
 pub(crate) struct LocalProxy {
     cm: Arc<CertManager>,
     opts: Arc<LocalModeOptions>,
+    bypass: Arc<Option<Bypass>>,
 }
 
 impl Proxy for LocalProxy {
@@ -34,10 +35,11 @@ impl Proxy for LocalProxy {
                 "No issuer found, you need use \"--generate-ca\" option to generate a CA certificate"
             );
         }
+        let bypass = Arc::new(opts.bypass.as_deref().map(Bypass::new));
 
         Ok(Self {
             cm: Arc::new(cm),
-
+            bypass,
             opts: Arc::new(opts),
         })
     }
@@ -83,19 +85,32 @@ impl LocalProxy {
         is_https: bool,
     ) -> Result<Response<Full<Bytes>>> {
         let size_hint = req.body().size_hint();
-        tracing::debug!("size hint: {:?}", size_hint);
+        trace!("size hint: {:?}", size_hint);
+        let (parts, body) = req.into_parts();
+        let uri = build_full_url(is_https, &parts)?;
+        let bypass = self
+            .bypass
+            .as_ref()
+            .as_ref()
+            .map(|b| b.check(&uri))
+            .unwrap_or_default();
+
         let response = if self.opts.full
             || size_hint.lower() as usize > self.opts.chunk
             || size_hint
                 .upper()
-                .map_or(false, |u| u as usize > self.opts.chunk)
+                .is_some_and(|u| u as usize > self.opts.chunk)
         {
-            let forwarder = Forwarder::new(req, &self.opts, is_https).await?;
+            let forwarder = Forwarder::new(parts, body, &self.opts, is_https).await?;
             forwarder.apply().await?
         } else {
-            let client = new_client(&self.opts)?;
-            let req = client.convert(req, is_https).await?;
-            tracing::debug!("Direct request without forwarding: {}", req.url());
+            let client = new_client(&self.opts, bypass)?;
+            let req = client.convert(parts, body, uri).await?;
+            tracing::debug!(
+                "Direct request without forwarding: {}, bypass: {}",
+                req.url(),
+                bypass
+            );
 
             let response = client.execute(req).await?;
             response.convert(Plain, "Direct").await?
@@ -121,11 +136,13 @@ impl CipherHelper for Plain {
     }
 }
 
-fn new_client(opts: &LocalModeOptions) -> Result<reqwest::Client> {
+fn new_client(opts: &LocalModeOptions, bypass: bool) -> Result<reqwest::Client> {
     let client = reqwest::ClientBuilder::new()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true);
-    if let Some(proxy) = &opts.common.proxy {
+    if let Some(proxy) = &opts.common.proxy
+        && !bypass
+    {
         Ok(client
             .proxy(reqwest::Proxy::all(proxy).context("invalid proxy option")?)
             .build()?)
@@ -136,24 +153,14 @@ fn new_client(opts: &LocalModeOptions) -> Result<reqwest::Client> {
 }
 
 trait RequestConvert {
-    async fn convert(
-        &self,
-        request: hyper::Request<Incoming>,
-        is_https: bool,
-    ) -> Result<reqwest::Request>;
+    async fn convert(&self, parts: Parts, body: Incoming, uri: Uri) -> Result<reqwest::Request>;
 }
 
 impl RequestConvert for reqwest::Client {
-    async fn convert(
-        &self,
-        request: hyper::Request<Incoming>,
-        is_https: bool,
-    ) -> Result<reqwest::Request> {
-        let (parts, body) = request.into_parts();
-        let url: Uri = build_full_url(is_https, &parts)?;
+    async fn convert(&self, parts: Parts, body: Incoming, uri: Uri) -> Result<reqwest::Request> {
         let body = body.collect().await?.to_bytes();
 
-        let mut builder = self.request(parts.method, url.to_string());
+        let mut builder = self.request(parts.method, uri.to_string());
         for (key, value) in parts.headers {
             if let Some(key) = key {
                 builder = builder.header(key, value);
@@ -190,6 +197,7 @@ fn build_full_url(is_https: bool, parts: &Parts) -> Result<Uri> {
 }
 
 mod buf;
+mod bypass;
 mod cert;
 mod forward;
 mod tls;

@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 use clap::ArgAction;
 use clap::Parser;
 use clap::Subcommand;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -50,10 +50,14 @@ pub(crate) struct LocalModeOptions {
     #[arg(long, short, default_value_t = 10240)]
     pub(crate) chunk: usize,
 
-    /// make all data go through the remote server. 
+    /// make all data go through the remote server.
     /// by default, only large request (larger than chunk size) will go through the remote server
     #[arg(long, short)]
     pub(crate) full: bool,
+
+    /// bypass the specific target (support CIDR and domain name), split with comma
+    #[arg(long, short)]
+    pub(crate) bypass: Option<String>,
 
     /// The Root CA certificate file path
     #[arg(long, default_value = "cert.ca.pem")]
