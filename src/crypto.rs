@@ -13,7 +13,7 @@ pub(crate) fn default_token() -> String {
 }
 
 pub(crate) fn package_info() -> String {
-    format!("{}-{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+    env!("CARGO_PKG_NAME").to_owned()
 }
 
 impl Cipher {
@@ -30,11 +30,11 @@ impl Cipher {
 
     pub(crate) fn encrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         let data = data.as_ref();
-        
+
         // Generate a random nonce for each encryption
         let mut nonce = [0u8; 12];
         rand::rng().fill_bytes(&mut nonce);
-        
+
         let cipher = ChaCha20Poly1305::new(&self.key.into());
         let ciphertext = cipher
             .encrypt(&nonce.into(), &[&self.associated_data, data].concat()[..])
@@ -44,22 +44,23 @@ impl Cipher {
         let mut result = Vec::with_capacity(12 + ciphertext.len());
         result.extend_from_slice(&nonce);
         result.extend_from_slice(&ciphertext);
-        
+
         Ok(result)
     }
 
     pub(crate) fn decrypt(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>> {
         let data = data.as_ref();
-        
+
         if data.len() < 12 {
             return Err(anyhow!("Data too short to contain nonce"));
         }
-        
+
         // Extract nonce from the beginning
         let (nonce_bytes, ciphertext) = data.split_at(12);
-        let nonce: [u8; 12] = nonce_bytes.try_into()
+        let nonce: [u8; 12] = nonce_bytes
+            .try_into()
             .map_err(|_| anyhow!("Invalid nonce length"))?;
-        
+
         let cipher = ChaCha20Poly1305::new(&self.key.into());
         let plaintext = cipher
             .decrypt(&nonce.into(), ciphertext)
@@ -69,7 +70,7 @@ impl Cipher {
         if plaintext.len() < self.associated_data.len() {
             return Err(anyhow!("Decrypted data too short"));
         }
-        
+
         let actual_data = &plaintext[self.associated_data.len()..];
         Ok(actual_data.to_vec())
     }

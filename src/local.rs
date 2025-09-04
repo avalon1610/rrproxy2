@@ -9,7 +9,10 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request, Response, Uri,
     body::{Body, Bytes, Incoming},
-    header::HOST,
+    header::{
+        CONNECTION, HOST, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
+        TRANSFER_ENCODING, UPGRADE,
+    },
     http::request::Parts,
 };
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
@@ -95,11 +98,12 @@ impl LocalProxy {
             .map(|b| b.check(&uri))
             .unwrap_or_default();
 
-        let response = if self.opts.full
-            || size_hint.lower() as usize > self.opts.chunk
-            || size_hint
-                .upper()
-                .is_some_and(|u| u as usize > self.opts.chunk)
+        let response = if !bypass
+            && (self.opts.full
+                || size_hint.lower() as usize > self.opts.chunk
+                || size_hint
+                    .upper()
+                    .is_some_and(|u| u as usize > self.opts.chunk))
         {
             let forwarder = Forwarder::new(parts, body, &self.opts, is_https).await?;
             forwarder.apply().await?
@@ -127,7 +131,7 @@ impl CipherHelper for Plain {
         Ok(data.as_ref().to_vec())
     }
 
-    fn adjust_content_type(_headers: &mut hyper::HeaderMap) -> Result<()> {
+    fn adjust_content_type(_headers: &mut hyper::HeaderMap, _body_len: usize) -> Result<()> {
         Ok(())
     }
 
@@ -159,10 +163,24 @@ trait RequestConvert {
 impl RequestConvert for reqwest::Client {
     async fn convert(&self, parts: Parts, body: Incoming, uri: Uri) -> Result<reqwest::Request> {
         let body = body.collect().await?.to_bytes();
+        const SKIP: &[HeaderName] = &[
+            HOST,
+            CONNECTION,
+            PROXY_AUTHORIZATION,
+            PROXY_AUTHENTICATE,
+            UPGRADE,
+            TE,
+            TRAILER,
+            TRANSFER_ENCODING,
+        ];
 
         let mut builder = self.request(parts.method, uri.to_string());
         for (key, value) in parts.headers {
             if let Some(key) = key {
+                if SKIP.contains(&key) {
+                    continue;
+                }
+
                 builder = builder.header(key, value);
             }
         }

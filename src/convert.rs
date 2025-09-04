@@ -3,7 +3,10 @@ use crate::proxy::CONTENT_TYPE_HEADER;
 use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::Full;
 use hyper::body::Bytes;
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING};
+use hyper::header::{
+    ACCEPT_RANGES, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+};
 use hyper::{HeaderMap, Response};
 use tracing::trace;
 
@@ -24,7 +27,7 @@ pub(crate) struct Encryptor<'a>(pub(crate) &'a Cipher);
 pub(crate) trait CipherHelper {
     fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>>;
 
-    fn adjust_content_type(headers: &mut HeaderMap) -> Result<()>;
+    fn adjust_content_type(headers: &mut HeaderMap, body_len: usize) -> Result<()>;
 
     fn name() -> &'static str;
 }
@@ -38,13 +41,16 @@ impl CipherHelper for Decryptor<'_> {
         self.0.decrypt(data)
     }
 
-    fn adjust_content_type(headers: &mut HeaderMap) -> Result<()> {
+    fn adjust_content_type(headers: &mut HeaderMap, body_len: usize) -> Result<()> {
+        common_adjust_headers(headers, body_len);
+
         let original = headers
             .get(CONTENT_TYPE_HEADER)
             .ok_or_else(|| anyhow!("No original content type header"))?;
         if !original.is_empty() {
             headers.insert(CONTENT_TYPE, original.clone());
         }
+
         Ok(())
     }
 }
@@ -58,7 +64,9 @@ impl CipherHelper for Encryptor<'_> {
         self.0.encrypt(data)
     }
 
-    fn adjust_content_type(headers: &mut HeaderMap) -> Result<()> {
+    fn adjust_content_type(headers: &mut HeaderMap, body_len: usize) -> Result<()> {
+        common_adjust_headers(headers, body_len);
+
         let original = headers
             .get(CONTENT_TYPE)
             .map(|v| v.to_str().unwrap_or(""))
@@ -69,6 +77,25 @@ impl CipherHelper for Encryptor<'_> {
 
         Ok(())
     }
+}
+
+fn common_adjust_headers(headers: &mut HeaderMap, body_len: usize) {
+    const HOP_BY_HOP: &[HeaderName] = &[
+        CONNECTION,
+        PROXY_AUTHENTICATE,
+        PROXY_AUTHORIZATION,
+        TE,
+        TRAILER,
+        TRANSFER_ENCODING,
+        UPGRADE,
+    ];
+    const MUTATED: &[HeaderName] = &[CONTENT_ENCODING, CONTENT_RANGE, ACCEPT_RANGES, ETAG];
+
+    for header in HOP_BY_HOP.iter().chain(MUTATED.iter()) {
+        headers.remove(header);
+    }
+
+    headers.insert(CONTENT_LENGTH, body_len.to_string().parse().unwrap());
 }
 
 impl ResponseConverter for reqwest::Response {
@@ -103,10 +130,9 @@ impl ResponseConverter for reqwest::Response {
                 }
             };
 
-            C::adjust_content_type(&mut headers).context("adjust content type error")?;
-            headers.insert(CONTENT_LENGTH, body.len().to_string().parse()?);
-            // remove transfer-encoding header if present, Transfer-encoding: chunked not compatible with Content-Length header
-            headers.remove(TRANSFER_ENCODING);
+            C::adjust_content_type(&mut headers, body.len())
+                .context("adjust content type error")?;
+
             body
         };
 
