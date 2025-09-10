@@ -1,6 +1,6 @@
 [package]
 name = "rrproxy2"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 
 [dependencies]
@@ -25,6 +25,7 @@ uuid = { version = "1.18.0", features = ["v4"] }
 chacha20poly1305 = "0.10.1"
 base64ct = { version = "1.8.0", features = ["alloc"] }
 ipnetwork = "0.21.1"
+futures-util = "0.3"
 
 [dependencies.reqwest]
 version = "0.12.23"

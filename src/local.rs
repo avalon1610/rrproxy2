@@ -23,6 +23,8 @@ pub(crate) struct LocalProxy {
     cm: Arc<CertManager>,
     opts: Arc<LocalModeOptions>,
     bypass: Arc<Option<Bypass>>,
+    proxy_client: Option<reqwest::Client>,
+    direct_client: reqwest::Client,
 }
 
 impl Proxy for LocalProxy {
@@ -40,10 +42,21 @@ impl Proxy for LocalProxy {
         }
         let bypass = Arc::new(opts.bypass.as_deref().map(Bypass::new));
 
+        // Create two clients: one with proxy (if configured) and one without proxy
+        let proxy_client = opts
+            .common
+            .proxy
+            .as_ref()
+            .map(|proxy| new_client(Some(proxy)))
+            .transpose()?;
+        let direct_client = new_client(None)?;
+
         Ok(Self {
             cm: Arc::new(cm),
             bypass,
             opts: Arc::new(opts),
+            proxy_client,
+            direct_client,
         })
     }
 
@@ -82,6 +95,11 @@ impl Proxy for LocalProxy {
 }
 
 impl LocalProxy {
+    /// Returns the proxy client if available, otherwise returns the direct client
+    fn client(&self) -> &reqwest::Client {
+        self.proxy_client.as_ref().unwrap_or(&self.direct_client)
+    }
+
     async fn handle_request(
         &self,
         req: Request<Incoming>,
@@ -105,10 +123,18 @@ impl LocalProxy {
                     .upper()
                     .is_some_and(|u| u as usize > self.opts.chunk))
         {
-            let forwarder = Forwarder::new(parts, body, &self.opts, is_https).await?;
-            forwarder.apply().await?
+            Forwarder::new(parts, body, &self.opts, is_https, self.client().clone())
+                .await?
+                .apply()
+                .await?
         } else {
-            let client = new_client(&self.opts, bypass)?;
+            // if bypass, always use direct client
+            let client = if bypass {
+                &self.direct_client
+            } else {
+                self.client()
+            };
+
             let req = client.convert(parts, body, uri).await?;
             tracing::debug!(
                 "Direct request without forwarding: {}, bypass: {}",
@@ -140,13 +166,11 @@ impl CipherHelper for Plain {
     }
 }
 
-fn new_client(opts: &LocalModeOptions, bypass: bool) -> Result<reqwest::Client> {
+fn new_client(proxy: Option<&String>) -> Result<reqwest::Client> {
     let client = reqwest::ClientBuilder::new()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true);
-    if let Some(proxy) = &opts.common.proxy
-        && !bypass
-    {
+    if let Some(proxy) = proxy {
         Ok(client
             .proxy(reqwest::Proxy::all(proxy).context("invalid proxy option")?)
             .build()?)
