@@ -1,8 +1,8 @@
 debug_local:
-    cargo run -- -v local -l 0.0.0.0:8080
+    cargo run -- -v local -l 0.0.0.0:8080 --full
 
 debug_remote:
-    cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.9.10:80
+    cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.9.10:80 
 
 release_windows:
     cargo xwin build -r --target=x86_64-pc-windows-msvc

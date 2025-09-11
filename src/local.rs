@@ -157,7 +157,7 @@ impl CipherHelper for Plain {
         Ok(data.as_ref().to_vec())
     }
 
-    fn adjust_content_type(_headers: &mut hyper::HeaderMap, _body_len: usize) -> Result<()> {
+    fn adjust_headers(_headers: &mut hyper::HeaderMap, _body_len: usize) -> Result<()> {
         Ok(())
     }
 

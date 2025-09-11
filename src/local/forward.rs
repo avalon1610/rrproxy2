@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::{
     convert::{Decryptor, ResponseConverter},
     crypto::{Cipher, default_token, package_info},
+    header::Obfuscator,
     local::build_full_url,
     options::LocalModeOptions,
     proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
@@ -10,7 +11,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
-use futures_util::{stream::FuturesUnordered, StreamExt};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Response, Uri,
@@ -103,7 +104,9 @@ impl Forwarder {
             vec![body]
         };
 
-        let cipher = Arc::new(Cipher::new(opts.common.token.clone().unwrap_or_else(default_token)));
+        let cipher = Arc::new(Cipher::new(
+            opts.common.token.clone().unwrap_or_else(default_token),
+        ));
         Ok(Self {
             chunks,
             remote_addr,
@@ -124,6 +127,8 @@ impl Forwarder {
         let now = Instant::now();
         info!("[{id}] transaction begins");
 
+        Obfuscator::encode(&mut headers)?;
+        
         // we need re-write the HOST header
         let remote_url: Uri = (self.remote_addr).parse()?;
         let host = remote_url.get_host()?;
@@ -157,56 +162,61 @@ impl Forwarder {
         headers.insert(TOTAL_CHUNKS_HEADER, total.to_string().parse()?);
 
         let last_index = total.saturating_sub(1);
-        
+
         // Create futures for all chunk requests using iterator and collect into FuturesUnordered
-        let mut futures: FuturesUnordered<_> = self.chunks.into_iter().enumerate().map(|(index, chunk)| {
-            // Clone necessary data for each future
-            let client = self.client.clone();
-            let remote_addr = self.remote_addr.clone();
-            let mut chunk_headers = headers.clone();
-            let chunk_cipher = self.cipher.clone();
-            let chunk_id = id.clone();
-            
-            async move {
-                chunk_headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
-                
-                let request = client.post(&remote_addr);
+        let mut futures: FuturesUnordered<_> = self
+            .chunks
+            .into_iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                // Clone necessary data for each future
+                let client = self.client.clone();
+                let remote_addr = self.remote_addr.clone();
+                let mut chunk_headers = headers.clone();
+                let chunk_cipher = self.cipher.clone();
+                let chunk_id = id.clone();
 
-                let request = if chunk.is_empty() {
-                    debug!(
-                        "[{chunk_id}] forwarding to {} with chunk index {} empty body",
-                        remote_addr, index
-                    );
-                    chunk_headers.remove(CONTENT_LENGTH);
-                    request
-                } else {
-                    let chunk = chunk_cipher.encrypt(chunk)?;
-                    let chunk = Base64::encode_string(&chunk);
+                async move {
+                    chunk_headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
 
-                    debug!(
-                        "[{chunk_id}] forwarding to {} with chunk index {} size {}",
-                        remote_addr,
-                        index,
-                        chunk.len()
-                    );
-                    // we need reset the Content-Length headers
-                    chunk_headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
-                    request.body(chunk)
-                };
+                    let request = client.post(&remote_addr);
 
-                let request = request.headers(chunk_headers).build()?;
-                trace!("[{chunk_id}] request headers: {:?}", request.headers());
+                    let request = if chunk.is_empty() {
+                        debug!(
+                            "[{chunk_id}] forwarding to {} with chunk index {} empty body",
+                            remote_addr, index
+                        );
+                        chunk_headers.remove(CONTENT_LENGTH);
+                        request
+                    } else {
+                        let chunk = chunk_cipher.encrypt(chunk)?;
+                        let chunk = Base64::encode_string(&chunk);
 
-                let response = client.execute(request).await?;
-                
-                // Return the index along with the response to identify the last chunk
-                Ok::<_, anyhow::Error>((index, response))
-            }
-        }).collect();
+                        debug!(
+                            "[{chunk_id}] forwarding to {} with chunk index {} size {}",
+                            remote_addr,
+                            index,
+                            chunk.len()
+                        );
+                        // we need reset the Content-Length headers
+                        chunk_headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
+                        request.body(chunk)
+                    };
+
+                    let request = request.headers(chunk_headers).build()?;
+                    trace!("[{chunk_id}] request headers: {:?}", request.headers());
+
+                    let response = client.execute(request).await?;
+
+                    // Return the index along with the response to identify the last chunk
+                    Ok::<_, anyhow::Error>((index, response))
+                }
+            })
+            .collect();
 
         // Process chunk responses as they complete, returning immediately when we get the last chunk
         let mut last_response = None;
-        
+
         while let Some(result) = futures.next().await {
             let (index, response) = result?;
             if index == last_index {

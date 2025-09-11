@@ -1,4 +1,5 @@
 use crate::crypto::Cipher;
+use crate::header::Obfuscator;
 use crate::proxy::CONTENT_TYPE_HEADER;
 use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::Full;
@@ -27,7 +28,7 @@ pub(crate) struct Encryptor<'a>(pub(crate) &'a Cipher);
 pub(crate) trait CipherHelper {
     fn process(&self, data: impl AsRef<[u8]>) -> Result<Vec<u8>>;
 
-    fn adjust_content_type(headers: &mut HeaderMap, body_len: usize) -> Result<()>;
+    fn adjust_headers(headers: &mut HeaderMap, body_len: usize) -> Result<()>;
 
     fn name() -> &'static str;
 }
@@ -41,8 +42,9 @@ impl CipherHelper for Decryptor<'_> {
         self.0.decrypt(data)
     }
 
-    fn adjust_content_type(headers: &mut HeaderMap, body_len: usize) -> Result<()> {
+    fn adjust_headers(headers: &mut HeaderMap, body_len: usize) -> Result<()> {
         common_adjust_headers(headers, body_len);
+        Obfuscator::decode(headers)?;
 
         let original = headers
             .get(CONTENT_TYPE_HEADER)
@@ -64,8 +66,9 @@ impl CipherHelper for Encryptor<'_> {
         self.0.encrypt(data)
     }
 
-    fn adjust_content_type(headers: &mut HeaderMap, body_len: usize) -> Result<()> {
+    fn adjust_headers(headers: &mut HeaderMap, body_len: usize) -> Result<()> {
         common_adjust_headers(headers, body_len);
+        Obfuscator::encode(headers)?;
 
         let original = headers
             .get(CONTENT_TYPE)
@@ -130,8 +133,7 @@ impl ResponseConverter for reqwest::Response {
                 }
             };
 
-            C::adjust_content_type(&mut headers, body.len())
-                .context("adjust content type error")?;
+            C::adjust_headers(&mut headers, body.len()).context("adjust content type error")?;
 
             body
         };

@@ -1,3 +1,4 @@
+use crate::header::Obfuscator;
 use crate::remote::HostEx;
 use crate::remote::info::Info;
 use anyhow::Result;
@@ -17,17 +18,19 @@ pub(crate) struct Transaction {
 }
 
 impl Transaction {
-    pub(crate) fn new(parts: Parts, body: Bytes, info: Info) -> Self {
-        let headers = parts.headers;
+    pub(crate) fn new(parts: Parts, body: Bytes, info: Info) -> Result<Self> {
+        let mut headers = parts.headers;
+        Obfuscator::decode(&mut headers)?;
+
         let mut cache = BTreeMap::new();
         cache.insert(info.chunk_index, body);
 
-        Transaction {
+        Ok(Transaction {
             headers,
             info,
             cache,
             start: Instant::now(),
-        }
+        })
     }
 
     pub(crate) fn update(&mut self, chunk_index: usize, body: Bytes) {

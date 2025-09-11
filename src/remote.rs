@@ -140,7 +140,7 @@ impl RemoteProxy {
                 // new transaction, we use request's headers (which already removed our internal headers)
                 // and body (will be store in cache)
                 debug!("[{id}] new transaction created, {} bytes", body.len());
-                Transaction::new(parts, body, info)
+                Transaction::new(parts, body, info)?
             };
 
             match transaction.commit()? {
