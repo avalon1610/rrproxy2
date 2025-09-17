@@ -1,5 +1,6 @@
 use crate::{
     convert::{CipherHelper, ResponseConverter},
+    crypto::package_info,
     local::{bypass::Bypass, cert::CertManager, forward::Forwarder},
     options::LocalModeOptions,
     proxy::Proxy,
@@ -31,6 +32,11 @@ impl Proxy for LocalProxy {
     type Options = LocalModeOptions;
 
     async fn new(opts: LocalModeOptions) -> Result<Self> {
+        let min = 12 + 16 + package_info().len();
+        if opts.chunk <= min {
+            bail!("chunk size too small, should be larger then {min}");
+        }
+
         let mut cm = CertManager::new(&opts.cert, &opts.key, &opts.cache_dir).await?;
 
         if opts.generate_ca {

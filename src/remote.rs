@@ -2,8 +2,7 @@ use crate::{
     convert::{Encryptor, ResponseConverter},
     crypto::{Cipher, default_token},
     options::RemoteModeOptions,
-    proxy::Proxy,
-    random_string,
+    proxy::{COMMIT_INDEX_HEADER, Proxy},
     remote::{
         info::Info,
         transaction::{Transaction, TransactionState},
@@ -15,6 +14,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, Uri,
     body::{Bytes, Incoming},
+    header::HeaderValue,
 };
 use reqwest::{Client, ClientBuilder};
 use std::{
@@ -114,6 +114,7 @@ impl RemoteProxy {
         };
 
         let id = info.id.clone();
+        let chunk_index = info.chunk_index;
         let request = {
             let mut transactions = self.transactions.lock().unwrap();
 
@@ -157,13 +158,17 @@ impl RemoteProxy {
             debug!("[{id}] transaction committed, sending to target");
             trace!("[{id}] forward request header: {:?}", request.headers());
 
-            let response = self
+            let mut response = self
                 .client
                 .execute(request)
                 .await
                 .context("target request error")?;
             info!("[{id}] handle whole transaction cost {:?}", start.elapsed());
 
+            response.headers_mut().insert(
+                COMMIT_INDEX_HEADER,
+                HeaderValue::from_str(&chunk_index.to_string())?,
+            );
             // Use the new trait to encrypt the response
             response
                 .convert(Encryptor(&self.cipher), &id)
@@ -171,10 +176,7 @@ impl RemoteProxy {
                 .with_context(|| format!("[{id}] response encrypt and convert error"))?
         } else {
             info!("[{id}] handle single chunk cost {:?}", now.elapsed());
-            Response::builder()
-                .status(200)
-                .body(random_string(8).into())
-                .unwrap() // unwrap is safe here
+            Response::default()
         };
 
         trace!("[{id}] forward response header: {:?}", response.headers());

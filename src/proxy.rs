@@ -57,6 +57,7 @@ where
 }
 
 pub(crate) const CHUNK_INDEX_HEADER: &str = "X-Fetch-Id";
+pub(crate) const COMMIT_INDEX_HEADER: &str = "X-Commit-Id";
 pub(crate) const TRANSACTION_ID_HEADER: &str = "X-Request-Id";
 /// this header should be encrypted, process is
 /// 1. combine: <original method>+<original_version>+<original url> (use plus(+) sign to separate)

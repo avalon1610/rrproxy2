@@ -6,8 +6,10 @@ use crate::{
     header::Obfuscator,
     local::build_full_url,
     options::LocalModeOptions,
-    proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
-    random_string,
+    proxy::{
+        CHUNK_INDEX_HEADER, COMMIT_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER,
+        TRANSACTION_ID_HEADER,
+    },
     remote::HostEx,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,11 +19,11 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Response, Uri,
     body::{Bytes, Incoming},
-    header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING},
     http::request::Parts,
 };
 use std::sync::Arc;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 pub(crate) struct Forwarder {
@@ -122,7 +124,6 @@ impl Forwarder {
         let url = build_full_url(self.is_https, &self.parts)?;
 
         let mut headers = self.parts.headers;
-        headers.insert(CACHE_CONTROL, "no-store".parse()?);
 
         let now = Instant::now();
         info!("[{id}] transaction begins");
@@ -161,8 +162,6 @@ impl Forwarder {
         let total = self.chunks.len();
         headers.insert(TOTAL_CHUNKS_HEADER, total.to_string().parse()?);
 
-        let last_index = total.saturating_sub(1);
-
         // Create futures for all chunk requests using iterator and collect into FuturesUnordered
         let mut futures: FuturesUnordered<_> = self
             .chunks
@@ -179,13 +178,11 @@ impl Forwarder {
                 async move {
                     chunk_headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
 
-                    let url = format!("{remote_addr}/{}", random_string(8));
-                    let request = client.post(&url);
-
+                    let request = client.post(&remote_addr);
                     let request = if chunk.is_empty() {
                         debug!(
                             "[{chunk_id}] forwarding to {} with chunk index {} empty body",
-                            url, index
+                            remote_addr, index
                         );
                         chunk_headers.remove(CONTENT_LENGTH);
                         request
@@ -195,7 +192,7 @@ impl Forwarder {
 
                         debug!(
                             "[{chunk_id}] forwarding to {} with chunk index {} size {}",
-                            url,
+                            remote_addr,
                             index,
                             chunk.len()
                         );
@@ -219,15 +216,29 @@ impl Forwarder {
         let mut last_response = None;
 
         while let Some(result) = futures.next().await {
-            let (index, response) = result?;
-            if index == last_index {
-                last_response = Some(response);
+            let (i, response) = result?;
+            trace!(
+                "[{id}] receiving: index: {} response: {:?}",
+                i,
+                response.headers()
+            );
 
-                tokio::spawn(async move {
-                    while let Some(_) = futures.next().await {
-                        // Process each chunk response as it completes
-                    }
-                });
+            let Some(commit_index) = response.headers().get(COMMIT_INDEX_HEADER) else {
+                continue;
+            };
+
+            let Ok(commit_index) = commit_index.to_str() else {
+                warn!("commit index {commit_index:?} can not conver to str");
+                continue;
+            };
+
+            let Ok(commit_index) = commit_index.parse::<usize>() else {
+                warn!("commit index {commit_index} can not conver to usize");
+                continue;
+            };
+
+            if commit_index == i {
+                last_response = Some(response);
                 break;
             }
         }
