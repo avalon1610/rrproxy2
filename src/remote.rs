@@ -3,6 +3,7 @@ use crate::{
     crypto::{Cipher, default_token},
     options::RemoteModeOptions,
     proxy::Proxy,
+    random_string,
     remote::{
         info::Info,
         transaction::{Transaction, TransactionState},
@@ -170,9 +171,12 @@ impl RemoteProxy {
                 .with_context(|| format!("[{id}] response encrypt and convert error"))?
         } else {
             info!("[{id}] handle single chunk cost {:?}", now.elapsed());
-            Response::default()
+            Response::builder()
+                .status(200)
+                .body(random_string(8).into())
+                .unwrap() // unwrap is safe here
         };
-        
+
         trace!("[{id}] forward response header: {:?}", response.headers());
         Ok(response)
     }

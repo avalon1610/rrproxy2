@@ -7,6 +7,10 @@ use crate::{
 use anyhow::Result;
 use clap::Parser;
 use misc::TracingLogger;
+use rand::{
+    distr::Alphanumeric,
+    {Rng, rng},
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -44,10 +48,18 @@ async fn start<P: Proxy>(opts: P::Options) -> Result<()> {
     proxy.serve().await
 }
 
+fn random_string(n: usize) -> String {
+    rng()
+        .sample_iter(&Alphanumeric)
+        .take(n)
+        .map(char::from)
+        .collect::<String>()
+}
+
+mod convert;
 mod crypto;
+mod header;
 mod local;
 mod options;
 mod proxy;
 mod remote;
-mod convert;
-mod header;

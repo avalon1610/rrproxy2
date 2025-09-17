@@ -5,8 +5,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::header::{
-    ACCEPT_RANGES, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-    HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+    ACCEPT_RANGES, CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE,
+    CONTENT_TYPE, ETAG, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
+    TRANSFER_ENCODING, UPGRADE,
 };
 use hyper::{HeaderMap, Response};
 use tracing::trace;
@@ -77,6 +78,7 @@ impl CipherHelper for Encryptor<'_> {
 
         headers.insert(CONTENT_TYPE_HEADER, original.parse()?);
         headers.insert(CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+        headers.insert(CACHE_CONTROL, "no-store".parse().unwrap());
 
         Ok(())
     }
@@ -114,7 +116,8 @@ impl ResponseConverter for reqwest::Response {
         let body_bytes = self.bytes().await?;
 
         trace!(
-            "[{id}] convert original response headers: {:?} body len: {}\n{}",
+            "[{id}] convert original response {} headers: {:?} body len: {}\n{}",
+            status,
             headers,
             body_bytes.len(),
             str::from_utf8(&body_bytes).unwrap_or("<binary>")

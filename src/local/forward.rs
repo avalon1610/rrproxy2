@@ -7,6 +7,7 @@ use crate::{
     local::build_full_url,
     options::LocalModeOptions,
     proxy::{CHUNK_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER, TRANSACTION_ID_HEADER},
+    random_string,
     remote::HostEx,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -16,13 +17,12 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Response, Uri,
     body::{Bytes, Incoming},
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING, USER_AGENT},
+    header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, HOST, TRANSFER_ENCODING},
     http::request::Parts,
 };
+use std::sync::Arc;
 use tracing::{debug, info, trace};
 use uuid::Uuid;
-
-use std::sync::Arc;
 
 pub(crate) struct Forwarder {
     chunks: Vec<Bytes>,
@@ -122,13 +122,13 @@ impl Forwarder {
         let url = build_full_url(self.is_https, &self.parts)?;
 
         let mut headers = self.parts.headers;
-        headers.insert(USER_AGENT, DEFAULT_USER_AGENT.parse()?);
+        headers.insert(CACHE_CONTROL, "no-store".parse()?);
 
         let now = Instant::now();
         info!("[{id}] transaction begins");
 
         Obfuscator::encode(&mut headers)?;
-        
+
         // we need re-write the HOST header
         let remote_url: Uri = (self.remote_addr).parse()?;
         let host = remote_url.get_host()?;
@@ -179,12 +179,13 @@ impl Forwarder {
                 async move {
                     chunk_headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
 
-                    let request = client.post(&remote_addr);
+                    let url = format!("{remote_addr}/{}", random_string(8));
+                    let request = client.post(&url);
 
                     let request = if chunk.is_empty() {
                         debug!(
                             "[{chunk_id}] forwarding to {} with chunk index {} empty body",
-                            remote_addr, index
+                            url, index
                         );
                         chunk_headers.remove(CONTENT_LENGTH);
                         request
@@ -194,7 +195,7 @@ impl Forwarder {
 
                         debug!(
                             "[{chunk_id}] forwarding to {} with chunk index {} size {}",
-                            remote_addr,
+                            url,
                             index,
                             chunk.len()
                         );
@@ -221,7 +222,13 @@ impl Forwarder {
             let (index, response) = result?;
             if index == last_index {
                 last_response = Some(response);
-                break; // Found the response we need, no need to wait for remaining chunks
+
+                tokio::spawn(async move {
+                    while let Some(_) = futures.next().await {
+                        // Process each chunk response as it completes
+                    }
+                });
+                break;
             }
         }
 
@@ -240,6 +247,3 @@ impl Forwarder {
             .with_context(|| format!("[{id}] response decrypt and convert error"))
     }
 }
-
-// TODO: make this configurable
-const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36";
