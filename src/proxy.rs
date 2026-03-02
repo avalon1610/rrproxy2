@@ -35,6 +35,25 @@ where
 
         loop {
             let (stream, addr) = listener.accept().await?;
+
+            // Peek at first bytes to diagnose parse errors
+            let mut peek_buf = [0u8; 32];
+            if let Ok(n) = stream.peek(&mut peek_buf).await {
+                let bytes = &peek_buf[..n];
+                warn!(
+                    "Connection from {addr}, first {n} bytes (hex): {}",
+                    bytes
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                warn!(
+                    "Connection from {addr}, first {n} bytes (str): {:?}",
+                    String::from_utf8_lossy(bytes)
+                );
+            }
+
             let io = TokioIo::new(stream);
             let proxy = self.clone();
 
@@ -49,7 +68,7 @@ where
                     )
                     .await
                 {
-                    warn!("Error serving connection: {}", err);
+                    warn!("Error serving connection: {:?}", err);
                 }
             });
         }

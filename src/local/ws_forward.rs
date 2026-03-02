@@ -97,7 +97,7 @@ impl WsConnectionManager {
         debug!("Connecting to proxy {}:{}", proxy_host, proxy_port);
         // Connect to proxy
         let mut stream = TcpStream::connect(format!("{}:{}", proxy_host, proxy_port)).await?;
-        debug!("Connected to proxy, sending CONNECT to {}:{}", host, port);
+        debug!("Connected to proxy, sending CONNECT for {}:{}", host, port);
 
         // Send CONNECT request
         let connect_req = format!(
@@ -114,7 +114,7 @@ impl WsConnectionManager {
         loop {
             let n = stream.read(&mut buf).await?;
             if n == 0 {
-                return Err(anyhow!("Connection closed while reading CONNECT response"));
+                bail!("Connection closed while reading CONNECT response");
             }
             response_buf.push(buf[0]);
 
@@ -128,7 +128,10 @@ impl WsConnectionManager {
         }
 
         let response = String::from_utf8_lossy(&response_buf);
-        trace!("Proxy CONNECT full response:\n{}", response);
+        trace!(
+            "Proxy CONNECT full response:\n{}\n{:02x?}",
+            response, response_buf
+        );
 
         // Check for 200 status in any HTTP version
         let first_line = response.lines().next().unwrap_or("");
