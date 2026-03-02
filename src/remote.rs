@@ -14,7 +14,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, Uri,
     body::{Bytes, Incoming},
-    header::HeaderValue,
+    header::{CONNECTION, UPGRADE, HeaderValue},
 };
 use reqwest::{Client, ClientBuilder};
 use std::{
@@ -67,8 +67,37 @@ impl Proxy for RemoteProxy {
         request: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
-        // assume we only receiving request only from local part
         info!("local request from {}", addr);
+
+        if self.opts.websocket && is_ws_upgrade(&request) {
+            let (cipher, client) = (self.cipher.clone(), self.client.clone());
+
+            // Get the Sec-WebSocket-Key header to compute the accept key
+            let ws_key = request
+                .headers()
+                .get("Sec-WebSocket-Key")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+
+            // Compute Sec-WebSocket-Accept
+            let accept_key = compute_ws_accept_key(ws_key);
+
+            // Spawn the upgrade handler
+            tokio::spawn(async move {
+                if let Err(e) = ws_handler::handle_ws_upgrade(request, cipher, client).await {
+                    warn!("ws error: {e:?}");
+                }
+            });
+
+            // Return 101 Switching Protocols with proper WebSocket headers
+            return Ok(Response::builder()
+                .status(101)
+                .header(UPGRADE, "websocket")
+                .header(CONNECTION, "Upgrade")
+                .header("Sec-WebSocket-Accept", accept_key)
+                .body(Full::default())
+                .unwrap());
+        }
 
         match self.handle_request(request).await {
             Ok(response) => Ok(response),
@@ -186,6 +215,33 @@ impl RemoteProxy {
 
 mod info;
 mod transaction;
+mod ws_handler;
+
+fn is_ws_upgrade(req: &Request<Incoming>) -> bool {
+    req.headers()
+        .get(UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false)
+        && req
+            .headers()
+            .get(CONNECTION)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("upgrade"))
+            .unwrap_or(false)
+}
+
+fn compute_ws_accept_key(key: &str) -> String {
+    use base64ct::{Base64, Encoding};
+    use sha1::{Sha1, Digest};
+
+    const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    let mut hasher = Sha1::new();
+    hasher.update(key.as_bytes());
+    hasher.update(WS_GUID.as_bytes());
+    let hash = hasher.finalize();
+    Base64::encode_string(&hash[..])
+}
 
 pub(crate) trait HostEx {
     fn get_host(&self) -> Result<String>;

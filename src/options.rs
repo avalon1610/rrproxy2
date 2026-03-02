@@ -78,6 +78,10 @@ pub(crate) struct LocalModeOptions {
     /// The directory to cache the server certificate
     #[arg(long, default_value = "cert_cache")]
     pub(crate) cache_dir: PathBuf,
+
+    /// Use WebSocket transport instead of HTTP chunked POST
+    #[arg(long, short = 'w')]
+    pub(crate) websocket: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -88,4 +92,8 @@ pub(crate) struct RemoteModeOptions {
     /// generate an uuid token for encryption.
     #[arg(long, short)]
     pub(crate) generate_token: bool,
+
+    /// Use WebSocket transport instead of HTTP chunked POST
+    #[arg(long, short = 'w')]
+    pub(crate) websocket: bool,
 }

@@ -1,7 +1,7 @@
 use crate::{
     convert::{CipherHelper, ResponseConverter},
     crypto::package_info,
-    local::{bypass::Bypass, cert::CertManager, forward::Forwarder},
+    local::{bypass::Bypass, cert::CertManager, forward::Forwarder, ws_forward::{WsConnectionManager, WsForwarder}},
     options::LocalModeOptions,
     proxy::Proxy,
 };
@@ -26,6 +26,7 @@ pub(crate) struct LocalProxy {
     bypass: Arc<Option<Bypass>>,
     proxy_client: Option<reqwest::Client>,
     direct_client: reqwest::Client,
+    ws_manager: Option<Arc<WsConnectionManager>>,
 }
 
 impl Proxy for LocalProxy {
@@ -57,12 +58,22 @@ impl Proxy for LocalProxy {
             .transpose()?;
         let direct_client = new_client(None)?;
 
+        // Initialize WebSocket connection manager if websocket mode is enabled
+        let ws_manager = if opts.websocket {
+            Some(Arc::new(
+                WsConnectionManager::new(&opts.remote, opts.common.proxy.as_deref()).await?,
+            ))
+        } else {
+            None
+        };
+
         Ok(Self {
             cm: Arc::new(cm),
             bypass,
             opts: Arc::new(opts),
             proxy_client,
             direct_client,
+            ws_manager,
         })
     }
 
@@ -129,10 +140,18 @@ impl LocalProxy {
                     .upper()
                     .is_some_and(|u| u as usize > self.opts.chunk))
         {
-            Forwarder::new(parts, body, &self.opts, is_https, self.client().clone())
-                .await?
-                .apply()
-                .await?
+            if self.opts.websocket {
+                let manager = self.ws_manager.as_ref().expect("ws_manager should be initialized in websocket mode");
+                WsForwarder::new(parts, body, &self.opts, is_https)
+                    .await?
+                    .apply(manager)
+                    .await?
+            } else {
+                Forwarder::new(parts, body, &self.opts, is_https, self.client().clone())
+                    .await?
+                    .apply()
+                    .await?
+            }
         } else {
             // if bypass, always use direct client
             let client = if bypass {
@@ -249,3 +268,4 @@ mod bypass;
 mod cert;
 mod forward;
 mod tls;
+mod ws_forward;
