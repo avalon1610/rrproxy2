@@ -14,7 +14,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, Uri,
     body::{Bytes, Incoming},
-    header::{CONNECTION, UPGRADE, HeaderValue},
+    header::{CONNECTION, HeaderValue, UPGRADE},
 };
 use reqwest::{Client, ClientBuilder};
 use std::{
@@ -71,7 +71,6 @@ impl Proxy for RemoteProxy {
 
         if self.opts.websocket && is_ws_upgrade(&request) {
             let (cipher, client) = (self.cipher.clone(), self.client.clone());
-
             // Get the Sec-WebSocket-Key header to compute the accept key
             let ws_key = request
                 .headers()
@@ -233,7 +232,7 @@ fn is_ws_upgrade(req: &Request<Incoming>) -> bool {
 
 fn compute_ws_accept_key(key: &str) -> String {
     use base64ct::{Base64, Encoding};
-    use sha1::{Sha1, Digest};
+    use sha1::{Digest, Sha1};
 
     const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     let mut hasher = Sha1::new();

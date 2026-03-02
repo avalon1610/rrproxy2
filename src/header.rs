@@ -79,10 +79,10 @@ impl Obfuscator {
                 to_insert.push((new_name, new_value));
             } else {
                 // Key unchanged; maybe update value in-place (only if UTF-8 and actually changes)
-                if let Ok(val_str) = value.to_str() {
-                    if let Some(new_val_str) = Self::apply_map(val_str, map) {
-                        *value = new_val_str.parse()?;
-                    }
+                if let Ok(val_str) = value.to_str()
+                    && let Some(new_val_str) = Self::apply_map(val_str, map)
+                {
+                    *value = new_val_str.parse()?;
                 }
             }
         }

@@ -3,7 +3,7 @@ use crate::{
     local::build_full_url,
     options::LocalModeOptions,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
@@ -14,13 +14,13 @@ use hyper::{
     body::{Bytes, Incoming},
     http::request::Parts,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::{
     net::TcpStream,
     sync::{Mutex, oneshot},
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
-use tracing::{debug, warn};
+use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -29,7 +29,7 @@ type WsReader = SplitStream<WsStream>;
 
 pub(crate) struct WsConnectionManager {
     sink: Arc<Mutex<WsSink>>,
-    pending: Arc<Mutex<HashMap<[u8; 16], oneshot::Sender<Vec<u8>>>>>,
+    pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
 }
 
 impl WsConnectionManager {
@@ -38,7 +38,10 @@ impl WsConnectionManager {
             .replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1);
 
+        debug!("Connecting to WebSocket: {}", ws_url);
+
         let ws = if let Some(proxy_url) = proxy {
+            debug!("Using proxy: {}", proxy_url);
             // Connect through HTTP proxy
             Self::connect_via_proxy(&ws_url, proxy_url)
                 .await
@@ -50,6 +53,8 @@ impl WsConnectionManager {
                 .context("connect websocket directly error")?;
             ws
         };
+
+        info!("WebSocket connection established to {}", ws_url);
 
         let (sink, reader) = ws.split();
 
@@ -88,8 +93,10 @@ impl WsConnectionManager {
             .ok_or_else(|| anyhow!("no host in proxy url"))?;
         let proxy_port = proxy_uri.port_u16().unwrap_or(8080);
 
+        debug!("Connecting to proxy {}:{}", proxy_host, proxy_port);
         // Connect to proxy
         let mut stream = TcpStream::connect(format!("{}:{}", proxy_host, proxy_port)).await?;
+        debug!("Connected to proxy, sending CONNECT to {}:{}", host, port);
 
         // Send CONNECT request
         let connect_req = format!(
@@ -98,44 +105,76 @@ impl WsConnectionManager {
         );
         stream.write_all(connect_req.as_bytes()).await?;
 
-        // Read CONNECT response
-        let mut buf = vec![0u8; 1024];
-        let n = stream.read(&mut buf).await?;
-        let response = String::from_utf8_lossy(&buf[..n]);
+        // Read CONNECT response - need to consume all headers until \r\n\r\n
+        let mut response_buf = Vec::new();
+        let mut buf = [0u8; 1];
 
-        if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
-            return Err(anyhow!(
-                "Proxy CONNECT failed: {}",
-                response.lines().next().unwrap_or("")
-            ));
+        // Read until we find \r\n\r\n (end of headers)
+        loop {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                return Err(anyhow!("Connection closed while reading CONNECT response"));
+            }
+            response_buf.push(buf[0]);
+
+            // Check for \r\n\r\n pattern
+            if response_buf.len() >= 4 {
+                let len = response_buf.len();
+                if &response_buf[len - 4..] == b"\r\n\r\n" {
+                    break;
+                }
+            }
         }
+
+        let response = String::from_utf8_lossy(&response_buf);
+        trace!("Proxy CONNECT full response:\n{}", response);
+
+        // Check for 200 status in any HTTP version
+        let first_line = response.lines().next().unwrap_or("");
+        if !first_line.starts_with("HTTP/1.1 200")
+            && !first_line.starts_with("HTTP/1.0 200")
+            && !first_line.starts_with("HTTP/2.0 200")
+        {
+            return Err(anyhow!("Proxy CONNECT failed: {}", first_line));
+        }
+
+        debug!("Proxy CONNECT successful, establishing WebSocket");
 
         // Now establish WebSocket over the tunneled connection
         if ws_url.starts_with("wss://") {
             // For wss://, wrap in TLS using native-tls
             use tokio_native_tls::{TlsConnector, native_tls};
 
+            debug!("Establishing TLS connection");
             let cx = native_tls::TlsConnector::builder()
                 .danger_accept_invalid_certs(true)
                 .build()?;
             let cx = TlsConnector::from(cx);
             let tls_stream = cx.connect(host, stream).await?;
 
+            debug!("TLS established, performing WebSocket handshake");
             // Wrap in MaybeTlsStream
             let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
-            let (ws, _) = tokio_tungstenite::client_async(ws_url, maybe_tls).await?;
+            let (ws, resp) = tokio_tungstenite::client_async(ws_url, maybe_tls)
+                .await
+                .context("websocket tls connect error")?;
+            debug!("WebSocket handshake response status: {:?}", resp.status());
             Ok(ws)
         } else {
+            debug!("Performing WebSocket handshake (plain)");
             // For ws://, use plain connection wrapped in MaybeTlsStream
             let maybe_tls = MaybeTlsStream::Plain(stream);
-            let (ws, _) = tokio_tungstenite::client_async(ws_url, maybe_tls).await?;
+            let (ws, resp) = tokio_tungstenite::client_async(ws_url, maybe_tls)
+                .await
+                .context("websocket connect error")?;
+            debug!("WebSocket handshake response status: {:?}", resp.status());
             Ok(ws)
         }
     }
 
     async fn reader_loop(
         mut reader: WsReader,
-        pending: Arc<Mutex<HashMap<[u8; 16], oneshot::Sender<Vec<u8>>>>>,
+        pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
     ) {
         while let Some(msg) = reader.next().await {
             match msg {
@@ -143,10 +182,11 @@ impl WsConnectionManager {
                     if data.len() < 17 || data[0] != 0x03 {
                         continue;
                     }
-                    let uuid: [u8; 16] = match data[1..17].try_into() {
+                    let uuid_bytes: [u8; 16] = match data[1..17].try_into() {
                         Ok(u) => u,
                         Err(_) => continue,
                     };
+                    let uuid = Uuid::from_bytes(uuid_bytes);
                     let response_data = data[17..].to_vec();
 
                     let mut pending = pending.lock().await;
@@ -169,16 +209,17 @@ impl WsConnectionManager {
 
     pub(crate) async fn send_request(
         &self,
-        uuid: [u8; 16],
+        uuid: Uuid,
         chunks: Vec<Bytes>,
     ) -> Result<oneshot::Receiver<Vec<u8>>> {
         let total = chunks.len() as u32;
         let mut sink = self.sink.lock().await;
+        let uuid_bytes = uuid.as_bytes();
 
         // Send frame 0x01: metadata
         let mut meta = Vec::with_capacity(1 + 16 + 4);
         meta.push(0x01u8);
-        meta.extend_from_slice(&uuid);
+        meta.extend_from_slice(uuid_bytes);
         meta.extend_from_slice(&total.to_le_bytes());
         sink.send(Message::Binary(meta.into())).await?;
 
@@ -186,7 +227,7 @@ impl WsConnectionManager {
         for (i, chunk) in chunks.into_iter().enumerate() {
             let mut frame = Vec::with_capacity(1 + 16 + 4 + chunk.len());
             frame.push(0x02u8);
-            frame.extend_from_slice(&uuid);
+            frame.extend_from_slice(uuid_bytes);
             frame.extend_from_slice(&(i as u32).to_le_bytes());
             frame.extend_from_slice(&chunk);
             sink.send(Message::Binary(frame.into())).await?;
@@ -205,7 +246,9 @@ impl WsConnectionManager {
 pub(crate) struct WsForwarder {
     chunks: Vec<Bytes>,
     cipher: Cipher,
-    uuid: [u8; 16],
+    uuid: Uuid,
+    url: String,
+    start: Instant,
 }
 
 impl WsForwarder {
@@ -217,6 +260,7 @@ impl WsForwarder {
     ) -> Result<Self> {
         let body = body.collect().await?.to_bytes();
         let url = build_full_url(is_https, &parts)?;
+        let url_str = url.to_string();
 
         // Serialize request as HTTP/1.1 wire format
         let mut req_bytes: Vec<u8> = Vec::new();
@@ -271,12 +315,17 @@ impl WsForwarder {
             .collect();
         let chunks = encrypted_chunks?;
 
-        let uuid = *Uuid::new_v4().as_bytes();
+        let uuid = Uuid::new_v4();
+        let start = Instant::now();
+
+        info!("[{uuid}] WS transaction begins");
 
         Ok(Self {
             chunks,
             cipher,
             uuid,
+            url: url_str,
+            start,
         })
     }
 
@@ -284,7 +333,7 @@ impl WsForwarder {
         self,
         manager: &WsConnectionManager,
     ) -> Result<Response<Full<Bytes>>> {
-        debug!("Sending WS request with uuid {:?}", self.uuid);
+        debug!("[{}] WS request -> {}", self.uuid, self.url);
 
         let rx = manager.send_request(self.uuid, self.chunks).await?;
 
@@ -292,25 +341,64 @@ impl WsForwarder {
         let encrypted = rx.await.map_err(|_| anyhow!("Response channel closed"))?;
         let decrypted = self.cipher.decrypt(&encrypted)?;
 
-        parse_response(decrypted)
+        let response = parse_response(decrypted).context("parse response error")?;
+
+        info!(
+            "[{}] WS transaction ends, status: {}, cost {:?}",
+            self.uuid,
+            response.status(),
+            self.start.elapsed()
+        );
+
+        Ok(response)
     }
 }
 
 fn parse_response(data: Vec<u8>) -> Result<Response<Full<Bytes>>> {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut resp = httparse::Response::new(&mut headers);
-    let status = resp.parse(&data)?;
-    let code = resp.code.ok_or_else(|| anyhow!("no status code"))?;
-    let body_offset = match status {
-        httparse::Status::Complete(n) => n,
-        httparse::Status::Partial => return Err(anyhow!("incomplete response")),
-    };
+    // Manual parsing to handle HTTP/2.0 which httparse doesn't support
+    let data_str = String::from_utf8_lossy(&data);
+    let mut lines = data_str.lines();
 
-    let mut builder = Response::builder().status(code);
-    for h in resp.headers.iter() {
-        builder = builder.header(h.name, h.value);
+    // Parse status line
+    let status_line = lines.next().ok_or_else(|| anyhow!("empty response"))?;
+    let parts: Vec<&str> = status_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        bail!("invalid status line: {}", status_line);
     }
 
-    let body = Bytes::copy_from_slice(&data[body_offset..]);
+    let status_code: u16 = parts[1]
+        .parse()
+        .with_context(|| format!("invalid status code: {}", parts[1]))?;
+
+    // Parse headers until empty line
+    let mut builder = Response::builder().status(status_code);
+    let mut body_start = 0;
+
+    for (i, line) in data_str.lines().enumerate() {
+        if i == 0 {
+            continue; // Skip status line
+        }
+        if line.is_empty() {
+            // Find the actual byte position of the body
+            let header_end = data_str[..data_str.len()]
+                .find("\r\n\r\n")
+                .or_else(|| data_str.find("\n\n"))
+                .ok_or_else(|| anyhow!("no body separator found"))?;
+            body_start = if data_str.contains("\r\n\r\n") {
+                header_end + 4
+            } else {
+                header_end + 2
+            };
+            break;
+        }
+
+        if let Some(colon_pos) = line.find(':') {
+            let name = line[..colon_pos].trim();
+            let value = line[colon_pos + 1..].trim();
+            builder = builder.header(name, value);
+        }
+    }
+
+    let body = Bytes::copy_from_slice(&data[body_start..]);
     Ok(builder.body(Full::new(body))?)
 }

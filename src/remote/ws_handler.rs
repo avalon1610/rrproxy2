@@ -5,9 +5,10 @@ use futures_util::{SinkExt, StreamExt};
 use hyper::{Request, body::Incoming, upgrade::on};
 use hyper_util::rt::TokioIo;
 use reqwest::Client;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio_tungstenite::{WebSocketStream, tungstenite::{Message, protocol::Role}};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 pub(crate) async fn handle_ws_upgrade(
     request: Request<Incoming>,
@@ -20,8 +21,8 @@ pub(crate) async fn handle_ws_upgrade(
     // Create WebSocket from already-upgraded connection
     let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
-    // Track ongoing transactions: uuid -> (total_chunks, received_chunks)
-    let mut transactions: BTreeMap<[u8; 16], (usize, BTreeMap<usize, Vec<u8>>)> = BTreeMap::new();
+    // Track ongoing transactions: uuid -> (total_chunks, received_chunks, start_time)
+    let mut transactions: BTreeMap<Uuid, (usize, BTreeMap<usize, Vec<u8>>, Instant)> = BTreeMap::new();
 
     while let Some(msg) = ws.next().await {
         match msg {
@@ -36,27 +37,29 @@ pub(crate) async fn handle_ws_upgrade(
                         if data.len() < 21 {
                             continue;
                         }
-                        let uuid: [u8; 16] = match data[1..17].try_into() {
+                        let uuid_bytes: [u8; 16] = match data[1..17].try_into() {
                             Ok(u) => u,
                             Err(_) => continue,
                         };
+                        let uuid = Uuid::from_bytes(uuid_bytes);
                         let total = u32::from_le_bytes(match data[17..21].try_into() {
                             Ok(b) => b,
                             Err(_) => continue,
                         }) as usize;
 
-                        debug!("ws: new transaction uuid={:?} total={}", uuid, total);
-                        transactions.insert(uuid, (total, BTreeMap::new()));
+                        info!("[{}] WS transaction begins, total={}", uuid, total);
+                        transactions.insert(uuid, (total, BTreeMap::new(), Instant::now()));
                     }
                     0x02 => {
                         // Chunk frame: [type][uuid][chunk_index LE][encrypted chunk]
                         if data.len() < 21 {
                             continue;
                         }
-                        let uuid: [u8; 16] = match data[1..17].try_into() {
+                        let uuid_bytes: [u8; 16] = match data[1..17].try_into() {
                             Ok(u) => u,
                             Err(_) => continue,
                         };
+                        let uuid = Uuid::from_bytes(uuid_bytes);
                         let index = u32::from_le_bytes(match data[17..21].try_into() {
                             Ok(b) => b,
                             Err(_) => continue,
@@ -70,12 +73,12 @@ pub(crate) async fn handle_ws_upgrade(
                             }
                         };
 
-                        if let Some((total, chunks)) = transactions.get_mut(&uuid) {
+                        if let Some((total, chunks, start)) = transactions.get_mut(&uuid) {
                             chunks.insert(index, decrypted);
 
                             // Check if all chunks received
                             if chunks.len() == *total {
-                                debug!("ws: transaction {:?} complete, forwarding", uuid);
+                                let start = *start;
 
                                 // Reassemble
                                 let mut raw: BytesMut = BytesMut::new();
@@ -84,7 +87,7 @@ pub(crate) async fn handle_ws_upgrade(
                                 }
 
                                 // Forward request
-                                let response_bytes = match forward_request(raw.freeze().to_vec(), &client).await {
+                                let response_bytes = match forward_request(raw.freeze().to_vec(), &client, uuid, start).await {
                                     Ok(r) => r,
                                     Err(e) => {
                                         warn!("Failed to forward request: {e:?}");
@@ -105,7 +108,7 @@ pub(crate) async fn handle_ws_upgrade(
 
                                 let mut frame = Vec::with_capacity(1 + 16 + encrypted.len());
                                 frame.push(0x03u8);
-                                frame.extend_from_slice(&uuid);
+                                frame.extend_from_slice(uuid.as_bytes());
                                 frame.extend_from_slice(&encrypted);
 
                                 if let Err(e) = ws.send(Message::Binary(frame.into())).await {
@@ -137,7 +140,7 @@ pub(crate) async fn handle_ws_upgrade(
     Ok(())
 }
 
-async fn forward_request(raw: Vec<u8>, client: &Client) -> Result<Vec<u8>> {
+async fn forward_request(raw: Vec<u8>, client: &Client, uuid: Uuid, start: Instant) -> Result<Vec<u8>> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     let body_offset = match req.parse(&raw)? {
@@ -147,6 +150,8 @@ async fn forward_request(raw: Vec<u8>, client: &Client) -> Result<Vec<u8>> {
 
     let method = req.method.ok_or_else(|| anyhow!("no method"))?;
     let path = req.path.ok_or_else(|| anyhow!("no path"))?;
+
+    debug!("[{}] WS forward {} {}", uuid, method, path);
 
     let mut builder = client.request(method.parse()?, path);
     for h in req.headers.iter() {
@@ -160,6 +165,13 @@ async fn forward_request(raw: Vec<u8>, client: &Client) -> Result<Vec<u8>> {
     let version = response.version();
     let resp_headers = response.headers().clone();
     let body_bytes = response.bytes().await?;
+
+    info!(
+        "[{}] WS transaction ends, status: {}, cost {:?}",
+        uuid,
+        status.as_u16(),
+        start.elapsed()
+    );
 
     // Serialize response as HTTP/1.1 wire format
     let version_str = match version {
