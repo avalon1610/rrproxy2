@@ -1,7 +1,12 @@
 use crate::{
     convert::{CipherHelper, ResponseConverter},
     crypto::package_info,
-    local::{bypass::Bypass, cert::CertManager, forward::Forwarder, ws_forward::{WsConnectionManager, WsForwarder}},
+    local::{
+        bypass::Bypass,
+        cert::CertManager,
+        forward::Forwarder,
+        ws_forward::{WsConnectionManager, WsForwarder},
+    },
     options::LocalModeOptions,
     proxy::Proxy,
 };
@@ -59,7 +64,7 @@ impl Proxy for LocalProxy {
         let direct_client = new_client(None)?;
 
         // Initialize WebSocket connection manager if websocket mode is enabled
-        let ws_manager = if opts.websocket {
+        let ws_manager = if opts.common.websocket {
             Some(Arc::new(
                 WsConnectionManager::new(&opts.remote, opts.common.proxy.as_deref()).await?,
             ))
@@ -140,8 +145,11 @@ impl LocalProxy {
                     .upper()
                     .is_some_and(|u| u as usize > self.opts.chunk))
         {
-            if self.opts.websocket {
-                let manager = self.ws_manager.as_ref().expect("ws_manager should be initialized in websocket mode");
+            if self.opts.common.websocket {
+                let manager = self
+                    .ws_manager
+                    .as_ref()
+                    .expect("ws_manager should be initialized in websocket mode");
                 WsForwarder::new(parts, body, &self.opts, is_https)
                     .await?
                     .apply(manager)

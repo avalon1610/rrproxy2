@@ -1,19 +1,29 @@
 use crate::crypto::Cipher;
 use anyhow::{Result, anyhow};
+use base64ct::{Base64, Encoding};
 use bytes::{BufMut, BytesMut};
 use futures_util::{SinkExt, StreamExt};
 use hyper::{Request, body::Incoming, upgrade::on};
 use hyper_util::rt::TokioIo;
 use reqwest::Client;
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
-use tokio_tungstenite::{WebSocketStream, tungstenite::{Message, protocol::Role}};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Instant,
+};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{Message, protocol::Role},
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+type Transactions = HashMap<Uuid, (usize, BTreeMap<usize, Vec<u8>>, Instant)>;
 pub(crate) async fn handle_ws_upgrade(
     request: Request<Incoming>,
     cipher: Arc<Cipher>,
     client: Client,
+    no_base64: bool,
 ) -> Result<()> {
     let stream = on(request).await?;
     let io = TokioIo::new(stream);
@@ -22,7 +32,7 @@ pub(crate) async fn handle_ws_upgrade(
     let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
     // Track ongoing transactions: uuid -> (total_chunks, received_chunks, start_time)
-    let mut transactions: BTreeMap<Uuid, (usize, BTreeMap<usize, Vec<u8>>, Instant)> = BTreeMap::new();
+    let mut transactions: Transactions = HashMap::new();
 
     while let Some(msg) = ws.next().await {
         match msg {
@@ -47,7 +57,7 @@ pub(crate) async fn handle_ws_upgrade(
                             Err(_) => continue,
                         }) as usize;
 
-                        info!("[{}] WS transaction begins, total={}", uuid, total);
+                        info!("[{}] WS transaction begins, chunks: {}", uuid, total);
                         transactions.insert(uuid, (total, BTreeMap::new(), Instant::now()));
                     }
                     0x02 => {
@@ -65,7 +75,19 @@ pub(crate) async fn handle_ws_upgrade(
                             Err(_) => continue,
                         }) as usize;
 
-                        let decrypted = match cipher.decrypt(&data[21..]) {
+                        let decoded = if no_base64 {
+                            data[21..].to_vec()
+                        } else {
+                            match Base64::decode_vec(&String::from_utf8_lossy(&data[21..])) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    warn!("Failed to decode base64 chunk: {e:?}");
+                                    continue;
+                                }
+                            }
+                        };
+
+                        let decrypted = match cipher.decrypt(&decoded) {
                             Ok(d) => d,
                             Err(e) => {
                                 warn!("Failed to decrypt chunk: {e:?}");
@@ -87,7 +109,14 @@ pub(crate) async fn handle_ws_upgrade(
                                 }
 
                                 // Forward request
-                                let response_bytes = match forward_request(raw.freeze().to_vec(), &client, uuid, start).await {
+                                let response_bytes = match forward_request(
+                                    raw.freeze().to_vec(),
+                                    &client,
+                                    uuid,
+                                    start,
+                                )
+                                .await
+                                {
                                     Ok(r) => r,
                                     Err(e) => {
                                         warn!("Failed to forward request: {e:?}");
@@ -106,10 +135,16 @@ pub(crate) async fn handle_ws_upgrade(
                                     }
                                 };
 
-                                let mut frame = Vec::with_capacity(1 + 16 + encrypted.len());
+                                let encoded = if no_base64 {
+                                    encrypted
+                                } else {
+                                    Base64::encode_string(&encrypted).into_bytes()
+                                };
+
+                                let mut frame = Vec::with_capacity(1 + 16 + encoded.len());
                                 frame.push(0x03u8);
                                 frame.extend_from_slice(uuid.as_bytes());
-                                frame.extend_from_slice(&encrypted);
+                                frame.extend_from_slice(&encoded);
 
                                 if let Err(e) = ws.send(Message::Binary(frame.into())).await {
                                     warn!("Failed to send response: {e:?}");
@@ -140,7 +175,12 @@ pub(crate) async fn handle_ws_upgrade(
     Ok(())
 }
 
-async fn forward_request(raw: Vec<u8>, client: &Client, uuid: Uuid, start: Instant) -> Result<Vec<u8>> {
+async fn forward_request(
+    raw: Vec<u8>,
+    client: &Client,
+    uuid: Uuid,
+    start: Instant,
+) -> Result<Vec<u8>> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     let body_offset = match req.parse(&raw)? {
@@ -182,9 +222,7 @@ async fn forward_request(raw: Vec<u8>, client: &Client, uuid: Uuid, start: Insta
     };
 
     let mut out = Vec::new();
-    out.extend_from_slice(
-        format!("{} {} \r\n", version_str, status.as_u16()).as_bytes(),
-    );
+    out.extend_from_slice(format!("{} {} \r\n", version_str, status.as_u16()).as_bytes());
     for (name, value) in &resp_headers {
         out.extend_from_slice(name.as_str().as_bytes());
         out.extend_from_slice(b": ");

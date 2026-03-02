@@ -1,4 +1,4 @@
-use anyhow::{Result};
+use anyhow::Result;
 use http_body_util::Full;
 use hyper::{
     Request, Response,
@@ -9,7 +9,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
 };
-use std::{convert::Infallible, net::SocketAddr, future::Future};
+use std::{convert::Infallible, future::Future, net::SocketAddr};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 

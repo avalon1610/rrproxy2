@@ -19,7 +19,10 @@ use tokio_rustls::TlsAcceptor;
 use tracing::warn;
 
 impl LocalProxy {
-    pub(crate) async fn handle_connect(&self, req: Request<Incoming>) -> Result<Response<Full<Bytes>>> {
+    pub(crate) async fn handle_connect(
+        &self,
+        req: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>> {
         // Extract the target host from the CONNECT request
         let target_host = req
             .uri()

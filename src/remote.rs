@@ -32,6 +32,7 @@ pub(crate) struct RemoteProxy {
     transactions: Arc<Mutex<HashMap<String, Transaction>>>,
     cipher: Arc<Cipher>,
     client: Client,
+    no_base64: bool,
 }
 
 impl Proxy for RemoteProxy {
@@ -49,12 +50,14 @@ impl Proxy for RemoteProxy {
         };
 
         let token = opts.common.token.clone().unwrap_or_else(default_token);
+        let no_base64 = opts.common.no_base64;
 
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
             cipher: Arc::new(Cipher::new(token)),
             opts: Arc::new(opts),
             client,
+            no_base64,
         })
     }
 
@@ -69,7 +72,7 @@ impl Proxy for RemoteProxy {
     ) -> Result<Response<Full<Bytes>>, Infallible> {
         info!("local request from {}", addr);
 
-        if self.opts.websocket && is_ws_upgrade(&request) {
+        if self.opts.common.websocket && is_ws_upgrade(&request) {
             let (cipher, client) = (self.cipher.clone(), self.client.clone());
             // Get the Sec-WebSocket-Key header to compute the accept key
             let ws_key = request
@@ -82,8 +85,11 @@ impl Proxy for RemoteProxy {
             let accept_key = compute_ws_accept_key(ws_key);
 
             // Spawn the upgrade handler
+            let no_base64 = self.no_base64;
             tokio::spawn(async move {
-                if let Err(e) = ws_handler::handle_ws_upgrade(request, cipher, client).await {
+                if let Err(e) =
+                    ws_handler::handle_ws_upgrade(request, cipher, client, no_base64).await
+                {
                     warn!("ws error: {e:?}");
                 }
             });
@@ -130,10 +136,16 @@ impl RemoteProxy {
         );
 
         let body = if !body.is_empty() {
-            let body = Base64::decode_vec(&String::from_utf8_lossy(&body))?;
+            let decoded_body = if self.no_base64 {
+                // Body is raw binary, no base64 decoding needed
+                body.to_vec()
+            } else {
+                // Body is base64 encoded, decode it first
+                Base64::decode_vec(&String::from_utf8_lossy(&body))?
+            };
             let body = self
                 .cipher
-                .decrypt(&body)
+                .decrypt(&decoded_body)
                 .with_context(|| format!("[{}] decrypt body error", info.id))?;
             Bytes::from_owner(body)
         } else {

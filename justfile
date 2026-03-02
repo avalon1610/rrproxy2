@@ -2,7 +2,7 @@ debug_local:
     cargo run -- -v local -l 0.0.0.0:8080 --full
 
 debug_local_ws:
-    cargo run -- -v local -l 0.0.0.0:8080 -f -w
+    cargo run -- -v local -l 0.0.0.0:8080 -f -w -c 200 -r http://172.29.3.67:8081
 
 debug_remote:
     cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 

@@ -33,6 +33,7 @@ pub(crate) struct Forwarder {
     parts: Parts,
     cipher: Arc<Cipher>,
     is_https: bool,
+    no_base64: bool,
 }
 
 impl Forwarder {
@@ -79,8 +80,12 @@ impl Forwarder {
         // - 16 (authentication tag length)
         // - and the associated data length
         let chunk_size = chunk_size - 12 - 16 - package_info().len();
-        // use Base64 will increase the size
-        let chunk_size = 3 * (chunk_size / 4);
+        // use Base64 will increase the size (only if base64 is enabled)
+        let chunk_size = if opts.common.no_base64 {
+            chunk_size
+        } else {
+            3 * (chunk_size / 4)
+        };
         let chunks = if length > chunk_size {
             // split the body into chunks, if length is larger than chunk size.
             // but we use random real chunk size (which all smaller than the config chunk size),
@@ -116,6 +121,7 @@ impl Forwarder {
             is_https,
             parts,
             cipher,
+            no_base64: opts.common.no_base64,
         })
     }
 
@@ -156,8 +162,13 @@ impl Forwarder {
             Base64::encode_string(&self.cipher.encrypt(info)?).parse()?,
         );
 
-        // reset content-type
-        headers.insert(CONTENT_TYPE, "text/plain".parse()?);
+        // reset content-type based on whether base64 is used for body
+        let content_type = if self.no_base64 {
+            "application/octet-stream"
+        } else {
+            "text/plain"
+        };
+        headers.insert(CONTENT_TYPE, content_type.parse()?);
 
         let total = self.chunks.len();
         headers.insert(TOTAL_CHUNKS_HEADER, total.to_string().parse()?);
@@ -174,6 +185,7 @@ impl Forwarder {
                 let mut chunk_headers = headers.clone();
                 let chunk_cipher = self.cipher.clone();
                 let chunk_id = id.clone();
+                let no_base64 = self.no_base64;
 
                 async move {
                     chunk_headers.insert(CHUNK_INDEX_HEADER, index.to_string().parse()?);
@@ -187,18 +199,25 @@ impl Forwarder {
                         chunk_headers.remove(CONTENT_LENGTH);
                         request
                     } else {
-                        let chunk = chunk_cipher.encrypt(chunk)?;
-                        let chunk = Base64::encode_string(&chunk);
+                        let encrypted_chunk = chunk_cipher.encrypt(chunk)?;
+                        let (body_data, body_len) = if no_base64 {
+                            // Send raw binary data
+                            let len = encrypted_chunk.len();
+                            (encrypted_chunk, len)
+                        } else {
+                            // Encode as base64 string
+                            let encoded = Base64::encode_string(&encrypted_chunk);
+                            let len = encoded.len();
+                            (encoded.into_bytes(), len)
+                        };
 
                         debug!(
                             "[{chunk_id}] forwarding to {} with chunk index {} size {}",
-                            remote_addr,
-                            index,
-                            chunk.len()
+                            remote_addr, index, body_len
                         );
                         // we need reset the Content-Length headers
-                        chunk_headers.insert(CONTENT_LENGTH, chunk.len().to_string().parse()?);
-                        request.body(chunk)
+                        chunk_headers.insert(CONTENT_LENGTH, body_len.to_string().parse()?);
+                        request.body(body_data)
                     };
 
                     let request = request.headers(chunk_headers).build()?;

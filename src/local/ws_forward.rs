@@ -4,6 +4,7 @@ use crate::{
     options::LocalModeOptions,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use base64ct::{Base64, Encoding};
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
@@ -249,6 +250,7 @@ pub(crate) struct WsForwarder {
     uuid: Uuid,
     url: String,
     start: Instant,
+    no_base64: bool,
 }
 
 impl WsForwarder {
@@ -283,7 +285,11 @@ impl WsForwarder {
 
         // Chunk size calculation (same as Forwarder)
         let chunk_size = opts.chunk - 12 - 16 - package_info().len();
-        let chunk_size = 3 * (chunk_size / 4);
+        let chunk_size = if opts.common.no_base64 {
+            chunk_size
+        } else {
+            3 * (chunk_size / 4)
+        };
 
         let mut data = Bytes::from(req_bytes);
         let chunks = if data.len() > chunk_size {
@@ -307,11 +313,19 @@ impl WsForwarder {
         };
 
         let cipher = Cipher::new(opts.common.token.clone().unwrap_or_else(default_token));
+        let no_base64 = opts.common.no_base64;
 
-        // Encrypt chunks
+        // Encrypt chunks and optionally encode with base64
         let encrypted_chunks: Result<Vec<Bytes>> = chunks
             .into_iter()
-            .map(|chunk| cipher.encrypt(&chunk).map(Bytes::from))
+            .map(|chunk| {
+                let encrypted = cipher.encrypt(&chunk)?;
+                if no_base64 {
+                    Ok(Bytes::from(encrypted))
+                } else {
+                    Ok(Bytes::from(Base64::encode_string(&encrypted)))
+                }
+            })
             .collect();
         let chunks = encrypted_chunks?;
 
@@ -326,6 +340,7 @@ impl WsForwarder {
             uuid,
             url: url_str,
             start,
+            no_base64,
         })
     }
 
@@ -333,13 +348,23 @@ impl WsForwarder {
         self,
         manager: &WsConnectionManager,
     ) -> Result<Response<Full<Bytes>>> {
-        debug!("[{}] WS request -> {}", self.uuid, self.url);
+        debug!(
+            "[{}] WS request -> {}, chunks: {}",
+            self.uuid,
+            self.url,
+            self.chunks.len()
+        );
 
         let rx = manager.send_request(self.uuid, self.chunks).await?;
 
         // Wait for response
         let encrypted = rx.await.map_err(|_| anyhow!("Response channel closed"))?;
-        let decrypted = self.cipher.decrypt(&encrypted)?;
+        let decoded = if self.no_base64 {
+            encrypted
+        } else {
+            Base64::decode_vec(&String::from_utf8_lossy(&encrypted))?
+        };
+        let decrypted = self.cipher.decrypt(&decoded)?;
 
         let response = parse_response(decrypted).context("parse response error")?;
 
