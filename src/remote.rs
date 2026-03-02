@@ -16,7 +16,9 @@ use hyper::{
     body::{Bytes, Incoming},
     header::{CONNECTION, HeaderValue, UPGRADE},
 };
+use rcgen::generate_simple_self_signed;
 use reqwest::{Client, ClientBuilder};
+use rustls::{Certificate, PrivateKey, ServerConfig};
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -24,6 +26,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, trace, warn};
 
 #[derive(Clone)]
@@ -115,6 +118,16 @@ impl Proxy for RemoteProxy {
                     .body("Invalid Request".into())
                     .unwrap()) // this unwrap never fails, because only set the status code
             }
+        }
+    }
+
+    async fn serve(self) -> Result<()> {
+        if self.opts.common.websocket && (self.opts.tls || self.opts.tls_cert.is_some()) {
+            let acceptor = build_tls_acceptor(&self.opts)?;
+            self.serve_tls(acceptor).await
+        } else {
+            // default plain HTTP serve
+            self.serve_http().await
         }
     }
 }
@@ -267,4 +280,35 @@ impl HostEx for Uri {
             port.map(|p| format!(":{}", p)).unwrap_or_default()
         ))
     }
+}
+
+fn build_tls_acceptor(opts: &RemoteModeOptions) -> Result<TlsAcceptor> {
+    let (cert_chain, key) =
+        if let (Some(cert_path), Some(key_path)) = (&opts.tls_cert, &opts.tls_key) {
+            let cert_pem = std::fs::read(cert_path)?;
+            let key_pem = std::fs::read(key_path)?;
+            let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())?
+                .into_iter()
+                .map(Certificate)
+                .collect::<Vec<_>>();
+            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_slice())?;
+            if keys.is_empty() {
+                anyhow::bail!("no private key found in {}", key_path.display());
+            }
+            (certs, PrivateKey(keys.remove(0)))
+        } else {
+            info!("Generating self-signed TLS certificate for WebSocket");
+            let rcgen::CertifiedKey { cert, signing_key } =
+                generate_simple_self_signed(vec!["localhost".to_string()])?;
+            let cert_der = cert.der().to_vec();
+            let key_der = signing_key.serialize_der();
+            (vec![Certificate(cert_der)], PrivateKey(key_der))
+        };
+
+    let config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }

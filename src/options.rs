@@ -96,4 +96,16 @@ pub(crate) struct RemoteModeOptions {
     /// generate an uuid token for encryption.
     #[arg(long, short)]
     pub(crate) generate_token: bool,
+
+    /// Enable TLS. Provide a PEM cert file, or omit to auto-generate a self-signed cert.
+    #[arg(long)]
+    pub(crate) tls_cert: Option<PathBuf>,
+
+    /// TLS private key file (PEM). Required if --tls-cert is set.
+    #[arg(long)]
+    pub(crate) tls_key: Option<PathBuf>,
+
+    /// Enable TLS with a self-signed cert (no cert/key files needed).
+    #[arg(long)]
+    pub(crate) tls: bool,
 }

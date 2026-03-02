@@ -1,21 +1,21 @@
 debug_local:
     cargo run -- -v local -l 0.0.0.0:8080 --full
 
-debug_local_ws:
-    cargo run -- -v local -l 0.0.0.0:8080 -f -w -c 200 -r http://172.29.3.67:8081
-
 debug_remote:
     cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 
 
+debug_local_ws:
+    cargo run -- -v local -l 0.0.0.0:8080 -f -w -c 200 -r https://172.29.3.67:8081
+
 debug_remote_ws:
-    cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 -w
+    cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 -w --tls
 
 release_windows:
     cargo xwin build -r --target=x86_64-pc-windows-msvc
 
 release_linux:
     cargo build -r --target=x86_64-unknown-linux-gnu
-    
+
 release_musl:
     cargo build -r --target=x86_64-unknown-linux-musl
 

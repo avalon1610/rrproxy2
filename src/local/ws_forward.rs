@@ -39,6 +39,12 @@ impl WsConnectionManager {
             .replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1);
 
+        if remote_addr.starts_with("http://") {
+            warn!(
+                "Using websocket may use https:// to connect to wss://, which is necessary for dhproxy"
+            );
+        }
+
         debug!("Connecting to WebSocket: {}", ws_url);
 
         let ws = if let Some(proxy_url) = proxy {
@@ -49,10 +55,29 @@ impl WsConnectionManager {
                 .context("connect websocket via proxy error")?
         } else {
             // Direct connection
-            let (ws, _) = connect_async(&ws_url)
-                .await
-                .context("connect websocket directly error")?;
-            ws
+            if ws_url.starts_with("wss://") {
+                use tokio_native_tls::{TlsConnector, native_tls};
+
+                let ws_uri: hyper::Uri = ws_url.parse()?;
+                let host = ws_uri.host().ok_or_else(|| anyhow!("no host in ws url"))?;
+                let port = ws_uri.port_u16().unwrap_or(443);
+                let cx = native_tls::TlsConnector::builder()
+                    .danger_accept_invalid_certs(true)
+                    .build()?;
+                let cx = TlsConnector::from(cx);
+                let stream = tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await?;
+                let tls_stream = cx.connect(host, stream).await?;
+                let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
+                let (ws, _) = tokio_tungstenite::client_async(ws_url.clone(), maybe_tls)
+                    .await
+                    .context("connect websocket directly error")?;
+                ws
+            } else {
+                let (ws, _) = connect_async(&ws_url)
+                    .await
+                    .context("connect websocket directly error")?;
+                ws
+            }
         };
 
         info!("WebSocket connection established to {}", ws_url);

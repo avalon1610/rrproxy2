@@ -11,6 +11,7 @@ use hyper_util::{
 };
 use std::{convert::Infallible, future::Future, net::SocketAddr};
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 pub(crate) trait Proxy: Clone
@@ -29,35 +30,55 @@ where
     ) -> impl Future<Output = Result<Response<Full<Bytes>>, Infallible>> + Send;
 
     async fn serve(self) -> Result<()> {
+        self.serve_http().await
+    }
+
+    async fn serve_http(self) -> Result<()> {
         let addr = self.listen_addr()?;
         let listener = TcpListener::bind(addr).await?;
         info!("Listening on {}", addr);
 
         loop {
             let (stream, addr) = listener.accept().await?;
-
-            // Peek at first bytes to diagnose parse errors
-            let mut peek_buf = [0u8; 32];
-            if let Ok(n) = stream.peek(&mut peek_buf).await {
-                let bytes = &peek_buf[..n];
-                warn!(
-                    "Connection from {addr}, first {n} bytes (hex): {}",
-                    bytes
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                warn!(
-                    "Connection from {addr}, first {n} bytes (str): {:?}",
-                    String::from_utf8_lossy(bytes)
-                );
-            }
-
             let io = TokioIo::new(stream);
             let proxy = self.clone();
 
             tokio::spawn(async move {
+                if let Err(err) = Builder::new(TokioExecutor::new())
+                    .serve_connection_with_upgrades(
+                        io,
+                        service_fn(|req| {
+                            let proxy = proxy.clone();
+                            async move { proxy.handler(req, addr).await }
+                        }),
+                    )
+                    .await
+                {
+                    warn!("Error serving connection: {:?}", err);
+                }
+            });
+        }
+    }
+
+    async fn serve_tls(self, acceptor: TlsAcceptor) -> Result<()> {
+        let addr = self.listen_addr()?;
+        let listener = TcpListener::bind(addr).await?;
+        info!("Listening on {} (TLS)", addr);
+
+        loop {
+            let (stream, addr) = listener.accept().await?;
+            let proxy = self.clone();
+            let acceptor = acceptor.clone();
+
+            tokio::spawn(async move {
+                let tls_stream = match acceptor.accept(stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("TLS accept error from {addr}: {e:?}");
+                        return;
+                    }
+                };
+                let io = TokioIo::new(tls_stream);
                 if let Err(err) = Builder::new(TokioExecutor::new())
                     .serve_connection_with_upgrades(
                         io,
