@@ -15,10 +15,15 @@ use hyper::{
     body::{Bytes, Incoming},
     http::request::Parts,
 };
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     net::TcpStream,
-    sync::{Mutex, oneshot},
+    sync::{Mutex, mpsc, oneshot},
+    time::sleep,
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use tracing::{debug, info, trace, warn};
@@ -28,13 +33,75 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
 type WsReader = SplitStream<WsStream>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionState {
+    Connected,
+    Disconnected,
+    Reconnecting,
+}
+
 pub(crate) struct WsConnectionManager {
     sink: Arc<Mutex<WsSink>>,
     pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
+    state: Arc<Mutex<ConnectionState>>,
+    reconnect_tx: mpsc::Sender<()>,
 }
 
 impl WsConnectionManager {
     pub(crate) async fn new(remote_addr: &str, proxy: Option<&str>) -> Result<Self> {
+        let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
+
+        let remote_addr = remote_addr.to_string();
+        let proxy = proxy.map(|s| s.to_string());
+
+        let state = Arc::new(Mutex::new(ConnectionState::Connected));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+
+        // Initial connection
+        let (sink, reader) = Self::connect(&remote_addr, proxy.as_deref()).await?;
+        let sink = Arc::new(Mutex::new(sink));
+
+        {
+            // Spawn reader task
+            let pending = pending.clone();
+            let state = state.clone();
+            let reconnect = reconnect_tx.clone();
+            tokio::spawn(async move {
+                Self::reader_loop(reader, pending, state, reconnect).await;
+            });
+        }
+
+        {
+            // Spawn reconnection handler
+            let sink_clone = sink.clone();
+            let pending = pending.clone();
+            let state = state.clone();
+            let remote_addr = remote_addr.clone();
+            let proxy = proxy.clone();
+            let reconnect_tx = reconnect_tx.clone();
+            tokio::spawn(async move {
+                Self::reconnection_handler(
+                    reconnect_rx,
+                    reconnect_tx,
+                    sink_clone,
+                    pending,
+                    state,
+                    remote_addr,
+                    proxy,
+                )
+                .await;
+            });
+        }
+
+        Ok(Self {
+            sink,
+            pending,
+            state,
+            reconnect_tx,
+        })
+    }
+
+    async fn connect(remote_addr: &str, proxy: Option<&str>) -> Result<(WsSink, WsReader)> {
         let ws_url = remote_addr
             .replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1);
@@ -65,7 +132,7 @@ impl WsConnectionManager {
                     .danger_accept_invalid_certs(true)
                     .build()?;
                 let cx = TlsConnector::from(cx);
-                let stream = tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await?;
+                let stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
                 let tls_stream = cx.connect(host, stream).await?;
                 let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
                 let (ws, _) = tokio_tungstenite::client_async(ws_url.clone(), maybe_tls)
@@ -82,20 +149,7 @@ impl WsConnectionManager {
 
         info!("WebSocket connection established to {}", ws_url);
 
-        let (sink, reader) = ws.split();
-
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let pending_clone = pending.clone();
-
-        // Spawn reader task
-        tokio::spawn(async move {
-            Self::reader_loop(reader, pending_clone).await;
-        });
-
-        Ok(Self {
-            sink: Arc::new(Mutex::new(sink)),
-            pending,
-        })
+        Ok(ws.split())
     }
 
     async fn connect_via_proxy(ws_url: &str, proxy_url: &str) -> Result<WsStream> {
@@ -204,6 +258,8 @@ impl WsConnectionManager {
     async fn reader_loop(
         mut reader: WsReader,
         pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
+        state: Arc<Mutex<ConnectionState>>,
+        reconnect_tx: mpsc::Sender<()>,
     ) {
         while let Some(msg) = reader.next().await {
             match msg {
@@ -225,13 +281,81 @@ impl WsConnectionManager {
                 }
                 Ok(Message::Close(_)) => {
                     warn!("WebSocket closed by remote");
+                    *state.lock().await = ConnectionState::Disconnected;
+                    let _ = reconnect_tx.send(()).await;
                     break;
                 }
                 Err(e) => {
                     warn!("WebSocket error: {e:?}");
+                    *state.lock().await = ConnectionState::Disconnected;
+                    let _ = reconnect_tx.send(()).await;
                     break;
                 }
                 _ => {}
+            }
+        }
+    }
+
+    async fn reconnection_handler(
+        mut reconnect_rx: mpsc::Receiver<()>,
+        reconnect_tx: mpsc::Sender<()>,
+        sink: Arc<Mutex<WsSink>>,
+        pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
+        state: Arc<Mutex<ConnectionState>>,
+        remote_addr: String,
+        proxy: Option<String>,
+    ) {
+        while reconnect_rx.recv().await.is_some() {
+            // Check if already reconnecting
+            {
+                let current_state = *state.lock().await;
+                if current_state == ConnectionState::Reconnecting {
+                    continue;
+                }
+            }
+
+            *state.lock().await = ConnectionState::Reconnecting;
+            info!("Attempting to reconnect WebSocket...");
+
+            const MAX_RETRIES: u32 = 3;
+            const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+            for attempt in 1..=MAX_RETRIES {
+                debug!("Reconnection attempt {}/{}", attempt, MAX_RETRIES);
+
+                match Self::connect(&remote_addr, proxy.as_deref()).await {
+                    Ok((new_sink, new_reader)) => {
+                        // Replace the sink
+                        *sink.lock().await = new_sink;
+
+                        // Spawn new reader loop
+                        let pending_clone = pending.clone();
+                        let state_clone = state.clone();
+                        let reconnect_tx_clone = reconnect_tx.clone();
+                        tokio::spawn(async move {
+                            Self::reader_loop(
+                                new_reader,
+                                pending_clone,
+                                state_clone,
+                                reconnect_tx_clone,
+                            )
+                            .await;
+                        });
+
+                        *state.lock().await = ConnectionState::Connected;
+                        info!("WebSocket reconnection successful");
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Reconnection attempt {} failed: {}", attempt, e);
+                        if attempt < MAX_RETRIES {
+                            sleep(RETRY_DELAY).await;
+                        } else {
+                            warn!("All reconnection attempts failed");
+                            *state.lock().await = ConnectionState::Disconnected;
+                        }
+                    }
+                }
             }
         }
     }
@@ -241,6 +365,39 @@ impl WsConnectionManager {
         uuid: Uuid,
         chunks: Vec<Bytes>,
     ) -> Result<oneshot::Receiver<Vec<u8>>> {
+        // Wait for connection to be ready
+        const MAX_WAIT_ATTEMPTS: u32 = 30; // 30 seconds total
+        const WAIT_INTERVAL: Duration = Duration::from_secs(1);
+
+        for attempt in 1..=MAX_WAIT_ATTEMPTS {
+            let state = *self.state.lock().await;
+            match state {
+                ConnectionState::Connected => break,
+                ConnectionState::Disconnected => {
+                    if attempt == 1 {
+                        warn!("WebSocket disconnected, triggering reconnection");
+                        let _ = self.reconnect_tx.send(()).await;
+                    }
+                    if attempt >= MAX_WAIT_ATTEMPTS {
+                        bail!(
+                            "WebSocket connection failed after {} attempts",
+                            MAX_WAIT_ATTEMPTS
+                        );
+                    }
+                    sleep(WAIT_INTERVAL).await;
+                }
+                ConnectionState::Reconnecting => {
+                    if attempt >= MAX_WAIT_ATTEMPTS {
+                        bail!(
+                            "WebSocket reconnection timeout after {} seconds",
+                            MAX_WAIT_ATTEMPTS
+                        );
+                    }
+                    sleep(WAIT_INTERVAL).await;
+                }
+            }
+        }
+
         let total = chunks.len() as u32;
         let mut sink = self.sink.lock().await;
         let uuid_bytes = uuid.as_bytes();
