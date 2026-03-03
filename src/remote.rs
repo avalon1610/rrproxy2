@@ -242,17 +242,15 @@ mod transaction;
 mod ws_handler;
 
 fn is_ws_upgrade(req: &Request<Incoming>) -> bool {
+    // Check Upgrade: websocket header (required).
+    // Note: Connection: Upgrade is intentionally not required here — reverse proxies
+    // such as Cloudflare strip hop-by-hop headers (including Connection) before
+    // forwarding to the origin, so we must not rely on it being present.
     req.headers()
         .get(UPGRADE)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("websocket"))
         .unwrap_or(false)
-        && req
-            .headers()
-            .get(CONNECTION)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.to_ascii_lowercase().contains("upgrade"))
-            .unwrap_or(false)
 }
 
 fn compute_ws_accept_key(key: &str) -> String {
