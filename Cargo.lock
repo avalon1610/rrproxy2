@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "rrproxy2"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "base64ct",

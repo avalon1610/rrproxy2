@@ -398,6 +398,12 @@ impl WsConnectionManager {
             }
         }
 
+        // Register pending response BEFORE sending frames to avoid a race
+        // where the reader_loop receives the 0x03 response before the sender
+        // is inserted into the map, causing the response to be silently dropped.
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(uuid, tx);
+
         let total = chunks.len() as u32;
         let mut sink = self.sink.lock().await;
         let uuid_bytes = uuid.as_bytes();
@@ -420,10 +426,6 @@ impl WsConnectionManager {
         }
 
         drop(sink);
-
-        // Register pending response
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(uuid, tx);
 
         Ok(rx)
     }
