@@ -1,7 +1,6 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
-use rand::RngCore;
 
 pub(crate) struct Cipher {
     key: [u8; 32],
@@ -32,8 +31,7 @@ impl Cipher {
         let data = data.as_ref();
 
         // Generate a random nonce for each encryption
-        let mut nonce = [0u8; 12];
-        rand::rng().fill_bytes(&mut nonce);
+        let nonce: [u8; 12] = rand::random();
 
         let cipher = ChaCha20Poly1305::new(&self.key.into());
         let ciphertext = cipher

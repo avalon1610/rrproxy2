@@ -18,7 +18,7 @@ use hyper::{
 };
 use rcgen::generate_simple_self_signed;
 use reqwest::{Client, ClientBuilder};
-use rustls::{Certificate, PrivateKey, ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -283,32 +283,27 @@ impl HostEx for Uri {
 }
 
 fn build_tls_acceptor(opts: &RemoteModeOptions) -> Result<TlsAcceptor> {
-    let (cert_chain, key) =
-        if let (Some(cert_path), Some(key_path)) = (&opts.tls_cert, &opts.tls_key) {
-            let cert_pem = std::fs::read(cert_path)?;
-            let key_pem = std::fs::read(key_path)?;
-            let certs = rustls_pemfile::certs(&mut cert_pem.as_slice())?
-                .into_iter()
-                .map(Certificate)
-                .collect::<Vec<_>>();
-            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_pem.as_slice())?;
-            if keys.is_empty() {
-                anyhow::bail!("no private key found in {}", key_path.display());
-            }
-            (certs, PrivateKey(keys.remove(0)))
-        } else {
-            info!("Generating self-signed TLS certificate for WebSocket");
-            let rcgen::CertifiedKey { cert, signing_key } =
-                generate_simple_self_signed(vec!["localhost".to_string()])?;
-            let cert_der = cert.der().to_vec();
-            let key_der = signing_key.serialize_der();
-            (vec![Certificate(cert_der)], PrivateKey(key_der))
-        };
+    let (cert_chain, key) = if let (Some(cert_path), Some(key_path)) =
+        (&opts.tls_cert, &opts.tls_key)
+    {
+        let cert_pem = std::fs::read(cert_path)?;
+        let key_pem = std::fs::read(key_path)?;
+        crate::tls::tls_parts_from_pem(&cert_pem, &key_pem).map_err(|e| {
+            anyhow!(
+                "{} (cert: {}, key: {})",
+                e,
+                cert_path.display(),
+                key_path.display()
+            )
+        })?
+    } else {
+        info!("Generating self-signed TLS certificate for WebSocket");
+        let rcgen::CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".to_string()])?;
+        let cert_der = CertificateDer::from(cert.der().to_vec());
+        let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+        (vec![cert_der], key_der)
+    };
 
-    let config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
-
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    crate::tls::tls_acceptor_from_parts(cert_chain, key)
 }

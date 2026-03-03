@@ -11,9 +11,6 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::{Builder, upgrade::downcast},
 };
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys};
-use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 use tracing::warn;
@@ -80,25 +77,7 @@ impl LocalProxy {
 }
 
 fn create_tls_acceptor(cert_pem: &str, key_pem: &str) -> Result<TlsAcceptor> {
-    // Parse certificate
-    let cert_chain = certs(&mut cert_pem.as_bytes())
-        .map_err(|_| anyhow!("Failed to parse certificate"))?
-        .into_iter()
-        .map(Certificate)
-        .collect();
-
-    // Parse private key
-    let mut keys = pkcs8_private_keys(&mut key_pem.as_bytes())
-        .map_err(|_| anyhow!("Failed to parse private key"))?;
-
-    let key = keys.pop().ok_or_else(|| anyhow!("No private key found"))?;
-
-    // Create server config
-    let config = ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, PrivateKey(key))
-        .map_err(|err| anyhow!("Failed to create TLS config: {}", err))?;
-
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    let (cert_chain, key) =
+        crate::tls::tls_parts_from_pem(cert_pem.as_bytes(), key_pem.as_bytes())?;
+    crate::tls::tls_acceptor_from_parts(cert_chain, key)
 }

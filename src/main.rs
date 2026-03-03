@@ -51,3 +51,4 @@ mod local;
 mod options;
 mod proxy;
 mod remote;
+mod tls;
