@@ -27,8 +27,12 @@ async fn main() -> Result<()> {
         match (config.local.is_some(), config.remote.is_some()) {
             (true, false) => opts.command = Some(Commands::Local(Default::default())),
             (false, true) => opts.command = Some(Commands::Remote(Default::default())),
-            (false, false) => bail!("no subcommand given and no [local] or [remote] section found in the config file"),
-            (true, true) => bail!("config file contains both [local] and [remote] sections; please specify the subcommand explicitly"),
+            (false, false) => bail!(
+                "no subcommand given and no [local] or [remote] section found in the config file"
+            ),
+            (true, true) => bail!(
+                "config file contains both [local] and [remote] sections; please specify the subcommand explicitly"
+            ),
         }
     }
 

@@ -13,7 +13,6 @@ use crate::{
     },
     proxy::Proxy,
 };
-use std::path::Path;
 use anyhow::{Context, Result, bail};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -25,6 +24,7 @@ use hyper::{
     },
     http::request::Parts,
 };
+use std::path::Path;
 use std::{convert::Infallible, net::SocketAddr, sync::Arc};
 use tracing::{info, trace, warn};
 
@@ -50,11 +50,17 @@ impl Proxy for LocalProxy {
 
         let cert = opts.cert.as_deref().unwrap_or(Path::new(DEFAULT_CERT));
         let key = opts.key.as_deref().unwrap_or(Path::new(DEFAULT_KEY));
-        let cache_dir = opts.cache_dir.as_deref().unwrap_or(Path::new(DEFAULT_CACHE_DIR));
+        let cache_dir = opts
+            .cache_dir
+            .as_deref()
+            .unwrap_or(Path::new(DEFAULT_CACHE_DIR));
         let mut cm = CertManager::new(cert, key, cache_dir).await?;
 
         if opts.generate_ca.unwrap_or(false) {
-            let cn = opts.ca_common_name.as_deref().unwrap_or(DEFAULT_CA_COMMON_NAME);
+            let cn = opts
+                .ca_common_name
+                .as_deref()
+                .unwrap_or(DEFAULT_CA_COMMON_NAME);
             cm.generate_ca_file(cn).await?;
         } else if !cm.has_issuer() {
             bail!(
@@ -125,7 +131,13 @@ impl Proxy for LocalProxy {
     }
 
     fn listen_addr(&self) -> Result<SocketAddr> {
-        Ok(self.opts.common.listen.as_deref().unwrap_or(DEFAULT_LISTEN).parse()?)
+        Ok(self
+            .opts
+            .common
+            .listen
+            .as_deref()
+            .unwrap_or(DEFAULT_LISTEN)
+            .parse()?)
     }
 }
 
@@ -151,14 +163,11 @@ impl LocalProxy {
             .map(|b| b.check(&uri))
             .unwrap_or_default();
 
-        let keyword_match = self
-            .opts
-            .remote_keywords
-            .as_deref()
-            .is_some_and(|kws| {
-                let url_str = uri.to_string();
-                kws.iter().any(|kw| !kw.is_empty() && url_str.contains(kw.as_str()))
-            });
+        let keyword_match = self.opts.remote_keywords.as_deref().is_some_and(|kws| {
+            let url_str = uri.to_string();
+            kws.iter()
+                .any(|kw| !kw.is_empty() && url_str.contains(kw.as_str()))
+        });
 
         let chunk = self.opts.chunk.unwrap_or(DEFAULT_CHUNK);
         let response = if !bypass

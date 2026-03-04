@@ -65,7 +65,13 @@ impl Proxy for RemoteProxy {
     }
 
     fn listen_addr(&self) -> Result<SocketAddr> {
-        Ok(self.opts.common.listen.as_deref().unwrap_or(DEFAULT_LISTEN).parse()?)
+        Ok(self
+            .opts
+            .common
+            .listen
+            .as_deref()
+            .unwrap_or(DEFAULT_LISTEN)
+            .parse()?)
     }
 
     async fn handler(
@@ -122,7 +128,9 @@ impl Proxy for RemoteProxy {
     }
 
     async fn serve(self) -> Result<()> {
-        if self.opts.common.websocket.unwrap_or(false) && (self.opts.tls.unwrap_or(false) || self.opts.tls_cert.is_some()) {
+        if self.opts.common.websocket.unwrap_or(false)
+            && (self.opts.tls.unwrap_or(false) || self.opts.tls_cert.is_some())
+        {
             let acceptor = build_tls_acceptor(&self.opts)?;
             self.serve_tls(acceptor).await
         } else {
@@ -286,6 +294,11 @@ fn build_tls_acceptor(opts: &RemoteModeOptions) -> Result<TlsAcceptor> {
     {
         let cert_pem = std::fs::read(cert_path)?;
         let key_pem = std::fs::read(key_path)?;
+        debug!(
+            "Loading TLS cert from {} and key from {}",
+            cert_path.display(),
+            key_path.display()
+        );
         crate::tls::tls_parts_from_pem(&cert_pem, &key_pem).map_err(|e| {
             anyhow!(
                 "{} (cert: {}, key: {})",
@@ -295,7 +308,7 @@ fn build_tls_acceptor(opts: &RemoteModeOptions) -> Result<TlsAcceptor> {
             )
         })?
     } else {
-        info!("Generating self-signed TLS certificate for WebSocket");
+        debug!("Generating self-signed TLS certificate for WebSocket");
         let rcgen::CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec!["localhost".to_string()])?;
         let cert_der = CertificateDer::from(cert.der().to_vec());

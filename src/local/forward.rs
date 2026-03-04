@@ -45,7 +45,10 @@ impl Forwarder {
         client: reqwest::Client,
     ) -> Result<Self> {
         let chunk_size = opts.chunk.unwrap_or(DEFAULT_CHUNK);
-        let remote_addr = opts.remote.clone().unwrap_or_else(|| DEFAULT_REMOTE.to_string());
+        let remote_addr = opts
+            .remote
+            .clone()
+            .unwrap_or_else(|| DEFAULT_REMOTE.to_string());
 
         let mut body = body.collect().await?.to_bytes();
         if let Some(encoding) = parts.headers.get(TRANSFER_ENCODING) {
