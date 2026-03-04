@@ -23,6 +23,7 @@ use std::{
 use tokio::{
     net::TcpStream,
     sync::{Mutex, mpsc, oneshot},
+    task::JoinHandle,
     time::sleep,
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
@@ -56,14 +57,18 @@ impl WsConnectionManager {
 
         let state = Arc::new(Mutex::new(ConnectionState::Connected));
         let pending = Arc::new(Mutex::new(HashMap::new()));
+        let ping_handle: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
         // Initial connection
         let (sink, reader) = Self::connect(&remote_addr, proxy.as_deref()).await?;
         let sink = Arc::new(Mutex::new(sink));
 
+        // Spawn initial ping keepalive task
+        *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone(), reconnect_tx.clone()));
+
         {
             // Spawn reader task
-            let pending = pending.clone();
+            let pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>> = pending.clone();
             let state = state.clone();
             let reconnect = reconnect_tx.clone();
             tokio::spawn(async move {
@@ -79,6 +84,7 @@ impl WsConnectionManager {
             let remote_addr = remote_addr.clone();
             let proxy = proxy.clone();
             let reconnect_tx = reconnect_tx.clone();
+            let ping_handle_clone = ping_handle.clone();
             tokio::spawn(async move {
                 Self::reconnection_handler(
                     reconnect_rx,
@@ -88,6 +94,7 @@ impl WsConnectionManager {
                     state,
                     remote_addr,
                     proxy,
+                    ping_handle_clone,
                 )
                 .await;
             });
@@ -309,6 +316,28 @@ impl WsConnectionManager {
         let _ = reconnect_tx.send(()).await;
     }
 
+    /// Spawn a periodic ping task. Returns a `JoinHandle` that can be `.abort()`ed
+    /// when the connection drops or is replaced. The task sends a WebSocket Ping
+    /// every `PING_INTERVAL` seconds; if the send fails it triggers a reconnect and
+    /// exits, so no task leak occurs even without an explicit abort.
+    fn spawn_ping_task(sink: Arc<Mutex<WsSink>>, reconnect_tx: mpsc::Sender<()>) -> JoinHandle<()> {
+        const PING_INTERVAL: Duration = Duration::from_secs(30);
+        tokio::spawn(async move {
+            loop {
+                sleep(PING_INTERVAL).await;
+                let mut sink = sink.lock().await;
+                match sink.send(Message::Ping(vec![].into())).await {
+                    Ok(()) => trace!("Sent WebSocket keepalive ping"),
+                    Err(e) => {
+                        warn!("WebSocket ping failed ({e}), triggering reconnect");
+                        let _ = reconnect_tx.send(()).await;
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
     async fn reconnection_handler(
         mut reconnect_rx: mpsc::Receiver<()>,
         reconnect_tx: mpsc::Sender<()>,
@@ -317,6 +346,7 @@ impl WsConnectionManager {
         state: Arc<Mutex<ConnectionState>>,
         remote_addr: String,
         proxy: Option<String>,
+        ping_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     ) {
         while reconnect_rx.recv().await.is_some() {
             // Check if already reconnecting
@@ -340,6 +370,13 @@ impl WsConnectionManager {
                     Ok((new_sink, new_reader)) => {
                         // Replace the sink
                         *sink.lock().await = new_sink;
+
+                        // Abort the stale ping task and spawn a fresh one
+                        if let Some(old) = ping_handle.lock().await.take() {
+                            old.abort();
+                        }
+                        *ping_handle.lock().await =
+                            Some(Self::spawn_ping_task(sink.clone(), reconnect_tx.clone()));
 
                         // Spawn new reader loop
                         let pending_clone = pending.clone();
