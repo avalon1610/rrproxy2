@@ -261,9 +261,9 @@ impl WsConnectionManager {
         state: Arc<Mutex<ConnectionState>>,
         reconnect_tx: mpsc::Sender<()>,
     ) {
-        while let Some(msg) = reader.next().await {
-            match msg {
-                Ok(Message::Binary(data)) => {
+        loop {
+            match reader.next().await {
+                Some(Ok(Message::Binary(data))) => {
                     if data.len() < 17 || data[0] != 0x03 {
                         continue;
                     }
@@ -279,21 +279,34 @@ impl WsConnectionManager {
                         let _ = tx.send(response_data);
                     }
                 }
-                Ok(Message::Close(_)) => {
+                Some(Ok(Message::Close(_))) => {
                     warn!("WebSocket closed by remote");
-                    *state.lock().await = ConnectionState::Disconnected;
-                    let _ = reconnect_tx.send(()).await;
                     break;
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     warn!("WebSocket error: {e:?}");
-                    *state.lock().await = ConnectionState::Disconnected;
-                    let _ = reconnect_tx.send(()).await;
+                    break;
+                }
+                None => {
+                    warn!("WebSocket stream ended (connection lost)");
                     break;
                 }
                 _ => {}
             }
         }
+
+        // Connection lost — mark disconnected, fail all pending requests, trigger reconnect
+        *state.lock().await = ConnectionState::Disconnected;
+
+        let mut pending = pending.lock().await;
+        let count = pending.len();
+        if count > 0 {
+            warn!("Dropping {count} pending WebSocket request(s) due to disconnection");
+            pending.clear(); // Dropping senders causes receivers to get RecvError
+        }
+        drop(pending);
+
+        let _ = reconnect_tx.send(()).await;
     }
 
     async fn reconnection_handler(
@@ -404,28 +417,37 @@ impl WsConnectionManager {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(uuid, tx);
 
-        let total = chunks.len() as u32;
-        let mut sink = self.sink.lock().await;
-        let uuid_bytes = uuid.as_bytes();
+        let send_result = async {
+            let total = chunks.len() as u32;
+            let mut sink = self.sink.lock().await;
+            let uuid_bytes = uuid.as_bytes();
 
-        // Send frame 0x01: metadata
-        let mut meta = Vec::with_capacity(1 + 16 + 4);
-        meta.push(0x01u8);
-        meta.extend_from_slice(uuid_bytes);
-        meta.extend_from_slice(&total.to_le_bytes());
-        sink.send(Message::Binary(meta.into())).await?;
+            // Send frame 0x01: metadata
+            let mut meta = Vec::with_capacity(1 + 16 + 4);
+            meta.push(0x01u8);
+            meta.extend_from_slice(uuid_bytes);
+            meta.extend_from_slice(&total.to_le_bytes());
+            sink.send(Message::Binary(meta.into())).await?;
 
-        // Send frame 0x02 for each chunk
-        for (i, chunk) in chunks.into_iter().enumerate() {
-            let mut frame = Vec::with_capacity(1 + 16 + 4 + chunk.len());
-            frame.push(0x02u8);
-            frame.extend_from_slice(uuid_bytes);
-            frame.extend_from_slice(&(i as u32).to_le_bytes());
-            frame.extend_from_slice(&chunk);
-            sink.send(Message::Binary(frame.into())).await?;
+            // Send frame 0x02 for each chunk
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                let mut frame = Vec::with_capacity(1 + 16 + 4 + chunk.len());
+                frame.push(0x02u8);
+                frame.extend_from_slice(uuid_bytes);
+                frame.extend_from_slice(&(i as u32).to_le_bytes());
+                frame.extend_from_slice(&chunk);
+                sink.send(Message::Binary(frame.into())).await?;
+            }
+
+            Ok::<(), anyhow::Error>(())
         }
+        .await;
 
-        drop(sink);
+        if let Err(e) = send_result {
+            // Clean up the pending entry since we failed to send
+            self.pending.lock().await.remove(&uuid);
+            return Err(e);
+        }
 
         Ok(rx)
     }
