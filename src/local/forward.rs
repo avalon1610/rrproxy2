@@ -5,7 +5,7 @@ use crate::{
     crypto::{Cipher, default_token, package_info},
     header::Obfuscator,
     local::build_full_url,
-    options::LocalModeOptions,
+    options::{DEFAULT_CHUNK, DEFAULT_REMOTE, LocalModeOptions},
     proxy::{
         CHUNK_INDEX_HEADER, COMMIT_INDEX_HEADER, ORIGINAL_URL_HEADER, TOTAL_CHUNKS_HEADER,
         TRANSACTION_ID_HEADER,
@@ -44,8 +44,8 @@ impl Forwarder {
         is_https: bool,
         client: reqwest::Client,
     ) -> Result<Self> {
-        let chunk_size = opts.chunk;
-        let remote_addr = opts.remote.clone();
+        let chunk_size = opts.chunk.unwrap_or(DEFAULT_CHUNK);
+        let remote_addr = opts.remote.clone().unwrap_or_else(|| DEFAULT_REMOTE.to_string());
 
         let mut body = body.collect().await?.to_bytes();
         if let Some(encoding) = parts.headers.get(TRANSFER_ENCODING) {
@@ -81,7 +81,7 @@ impl Forwarder {
         // - and the associated data length
         let chunk_size = chunk_size - 12 - 16 - package_info().len();
         // use Base64 will increase the size (only if base64 is enabled)
-        let chunk_size = if opts.common.no_base64 {
+        let chunk_size = if opts.common.no_base64.unwrap_or(false) {
             chunk_size
         } else {
             3 * (chunk_size / 4)
@@ -121,7 +121,7 @@ impl Forwarder {
             is_https,
             parts,
             cipher,
-            no_base64: opts.common.no_base64,
+            no_base64: opts.common.no_base64.unwrap_or(false),
         })
     }
 

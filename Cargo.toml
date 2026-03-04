@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.99"
 blake3 = "1.8.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 sha1 = "0.10"
 clap = { version = "4.5.46", features = ["derive"] }
 hex = "0.4"

@@ -1,7 +1,7 @@
 use crate::{
     convert::{Encryptor, ResponseConverter},
     crypto::{Cipher, default_token},
-    options::RemoteModeOptions,
+    options::{DEFAULT_LISTEN, RemoteModeOptions},
     proxy::{COMMIT_INDEX_HEADER, Proxy},
     remote::{
         info::Info,
@@ -53,7 +53,7 @@ impl Proxy for RemoteProxy {
         };
 
         let token = opts.common.token.clone().unwrap_or_else(default_token);
-        let no_base64 = opts.common.no_base64;
+        let no_base64 = opts.common.no_base64.unwrap_or(false);
 
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
@@ -65,7 +65,7 @@ impl Proxy for RemoteProxy {
     }
 
     fn listen_addr(&self) -> Result<SocketAddr> {
-        Ok(self.opts.common.listen.parse()?)
+        Ok(self.opts.common.listen.as_deref().unwrap_or(DEFAULT_LISTEN).parse()?)
     }
 
     async fn handler(
@@ -75,7 +75,7 @@ impl Proxy for RemoteProxy {
     ) -> Result<Response<Full<Bytes>>, Infallible> {
         info!("local request from {}", addr);
 
-        if self.opts.common.websocket && is_ws_upgrade(&request) {
+        if self.opts.common.websocket.unwrap_or(false) && is_ws_upgrade(&request) {
             let (cipher, client) = (self.cipher.clone(), self.client.clone());
             // Get the Sec-WebSocket-Key header to compute the accept key
             let ws_key = request
@@ -122,7 +122,7 @@ impl Proxy for RemoteProxy {
     }
 
     async fn serve(self) -> Result<()> {
-        if self.opts.common.websocket && (self.opts.tls || self.opts.tls_cert.is_some()) {
+        if self.opts.common.websocket.unwrap_or(false) && (self.opts.tls.unwrap_or(false) || self.opts.tls_cert.is_some()) {
             let acceptor = build_tls_acceptor(&self.opts)?;
             self.serve_tls(acceptor).await
         } else {

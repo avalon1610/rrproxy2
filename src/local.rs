@@ -7,9 +7,13 @@ use crate::{
         forward::Forwarder,
         ws_forward::{WsConnectionManager, WsForwarder},
     },
-    options::LocalModeOptions,
+    options::{
+        DEFAULT_CA_COMMON_NAME, DEFAULT_CACHE_DIR, DEFAULT_CERT, DEFAULT_CHUNK, DEFAULT_KEY,
+        DEFAULT_LISTEN, DEFAULT_REMOTE, LocalModeOptions,
+    },
     proxy::Proxy,
 };
+use std::path::Path;
 use anyhow::{Context, Result, bail};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -39,14 +43,19 @@ impl Proxy for LocalProxy {
 
     async fn new(opts: LocalModeOptions) -> Result<Self> {
         let min = 12 + 16 + package_info().len();
-        if opts.chunk <= min {
+        let chunk = opts.chunk.unwrap_or(DEFAULT_CHUNK);
+        if chunk <= min {
             bail!("chunk size too small, should be larger then {min}");
         }
 
-        let mut cm = CertManager::new(&opts.cert, &opts.key, &opts.cache_dir).await?;
+        let cert = opts.cert.as_deref().unwrap_or(Path::new(DEFAULT_CERT));
+        let key = opts.key.as_deref().unwrap_or(Path::new(DEFAULT_KEY));
+        let cache_dir = opts.cache_dir.as_deref().unwrap_or(Path::new(DEFAULT_CACHE_DIR));
+        let mut cm = CertManager::new(cert, key, cache_dir).await?;
 
-        if opts.generate_ca {
-            cm.generate_ca_file(&opts.ca_common_name).await?;
+        if opts.generate_ca.unwrap_or(false) {
+            let cn = opts.ca_common_name.as_deref().unwrap_or(DEFAULT_CA_COMMON_NAME);
+            cm.generate_ca_file(cn).await?;
         } else if !cm.has_issuer() {
             bail!(
                 "No issuer found, you need use \"--generate-ca\" option to generate a CA certificate"
@@ -64,9 +73,13 @@ impl Proxy for LocalProxy {
         let direct_client = new_client(None)?;
 
         // Initialize WebSocket connection manager if websocket mode is enabled
-        let ws_manager = if opts.common.websocket {
+        let ws_manager = if opts.common.websocket.unwrap_or(false) {
             Some(Arc::new(
-                WsConnectionManager::new(&opts.remote, opts.common.proxy.as_deref()).await?,
+                WsConnectionManager::new(
+                    opts.remote.as_deref().unwrap_or(DEFAULT_REMOTE),
+                    opts.common.proxy.as_deref(),
+                )
+                .await?,
             ))
         } else {
             None
@@ -112,7 +125,7 @@ impl Proxy for LocalProxy {
     }
 
     fn listen_addr(&self) -> Result<SocketAddr> {
-        Ok(self.opts.common.listen.parse()?)
+        Ok(self.opts.common.listen.as_deref().unwrap_or(DEFAULT_LISTEN).parse()?)
     }
 }
 
@@ -138,14 +151,13 @@ impl LocalProxy {
             .map(|b| b.check(&uri))
             .unwrap_or_default();
 
+        let chunk = self.opts.chunk.unwrap_or(DEFAULT_CHUNK);
         let response = if !bypass
-            && (self.opts.full
-                || size_hint.lower() as usize > self.opts.chunk
-                || size_hint
-                    .upper()
-                    .is_some_and(|u| u as usize > self.opts.chunk))
+            && (self.opts.full.unwrap_or(false)
+                || size_hint.lower() as usize > chunk
+                || size_hint.upper().is_some_and(|u| u as usize > chunk))
         {
-            if self.opts.common.websocket {
+            if self.opts.common.websocket.unwrap_or(false) {
                 let manager = self
                     .ws_manager
                     .as_ref()

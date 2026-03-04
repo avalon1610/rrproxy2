@@ -1,7 +1,7 @@
 use crate::{
     crypto::{Cipher, default_token, package_info},
     local::build_full_url,
-    options::LocalModeOptions,
+    options::{DEFAULT_CHUNK, LocalModeOptions},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64ct::{Base64, Encoding};
@@ -493,8 +493,8 @@ impl WsForwarder {
         req_bytes.extend_from_slice(&body);
 
         // Chunk size calculation (same as Forwarder)
-        let chunk_size = opts.chunk - 12 - 16 - package_info().len();
-        let chunk_size = if opts.common.no_base64 {
+        let chunk_size = opts.chunk.unwrap_or(DEFAULT_CHUNK) - 12 - 16 - package_info().len();
+        let chunk_size = if opts.common.no_base64.unwrap_or(false) {
             chunk_size
         } else {
             3 * (chunk_size / 4)
@@ -522,7 +522,7 @@ impl WsForwarder {
         };
 
         let cipher = Cipher::new(opts.common.token.clone().unwrap_or_else(default_token));
-        let no_base64 = opts.common.no_base64;
+        let no_base64 = opts.common.no_base64.unwrap_or(false);
 
         // Encrypt chunks and optionally encode with base64
         let encrypted_chunks: Result<Vec<Bytes>> = chunks
