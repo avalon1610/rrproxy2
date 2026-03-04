@@ -42,6 +42,9 @@ features = ["native-tls-vendored", "brotli", "gzip", "zstd", "deflate"]
 version = "0.1"
 features = ["tokio", "server", "http1", "http2"]
 
+[dependencies.merge_derive]
+path = "merge_derive"
+
 [dependencies.misc]
 git = "https://github.com/avalon1610/misc.git"
 features = ["tracing_logger"]

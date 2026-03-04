@@ -1,10 +1,10 @@
 use crate::{
     local::LocalProxy,
-    options::{Commands, ConfigFile, Options},
+    options::{Commands, ConfigFile, Merge, Options},
     proxy::Proxy,
     remote::RemoteProxy,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use misc::TracingLogger;
 
@@ -22,41 +22,32 @@ async fn main() -> Result<()> {
         ConfigFile::default()
     };
 
+    // If no subcommand was given, infer the mode from the config file.
+    if opts.command.is_none() {
+        match (config.local.is_some(), config.remote.is_some()) {
+            (true, false) => opts.command = Some(Commands::Local(Default::default())),
+            (false, true) => opts.command = Some(Commands::Remote(Default::default())),
+            (false, false) => bail!("no subcommand given and no [local] or [remote] section found in the config file"),
+            (true, true) => bail!("config file contains both [local] and [remote] sections; please specify the subcommand explicitly"),
+        }
+    }
+
     // Merge config into CLI opts: CLI (Some) always wins; None means "not set on CLI",
     // so we fill from the config file as a fallback.
-    match &mut opts.command {
+    match opts.command.as_mut().expect("command is set above") {
         Commands::Local(local) => {
             if let Some(cfg) = config.local {
-                merge_opt(&mut local.common.listen, cfg.common.listen);
-                merge_opt(&mut local.common.proxy, cfg.common.proxy);
-                merge_opt(&mut local.common.token, cfg.common.token);
-                merge_opt(&mut local.common.websocket, cfg.common.websocket);
-                merge_opt(&mut local.common.no_base64, cfg.common.no_base64);
-                merge_opt(&mut local.remote, cfg.remote);
-                merge_opt(&mut local.chunk, cfg.chunk);
-                merge_opt(&mut local.full, cfg.full);
-                merge_opt(&mut local.bypass, cfg.bypass);
-                merge_opt(&mut local.cert, cfg.cert);
-                merge_opt(&mut local.key, cfg.key);
-                merge_opt(&mut local.generate_ca, cfg.generate_ca);
-                merge_opt(&mut local.ca_common_name, cfg.ca_common_name);
-                merge_opt(&mut local.cache_dir, cfg.cache_dir);
+                local.merge(cfg);
             }
         }
         Commands::Remote(remote) => {
             if let Some(cfg) = config.remote {
-                merge_opt(&mut remote.common.listen, cfg.common.listen);
-                merge_opt(&mut remote.common.proxy, cfg.common.proxy);
-                merge_opt(&mut remote.common.token, cfg.common.token);
-                merge_opt(&mut remote.common.websocket, cfg.common.websocket);
-                merge_opt(&mut remote.common.no_base64, cfg.common.no_base64);
-                merge_opt(&mut remote.generate_token, cfg.generate_token);
-                merge_opt(&mut remote.tls_cert, cfg.tls_cert);
-                merge_opt(&mut remote.tls_key, cfg.tls_key);
-                merge_opt(&mut remote.tls, cfg.tls);
+                remote.merge(cfg);
             }
         }
     }
+
+    let command = opts.command.expect("command is set above");
 
     let level = match opts.verbose {
         0 => "info",
@@ -64,13 +55,13 @@ async fn main() -> Result<()> {
         _ => "trace",
     };
 
-    let log_dir = match opts.command {
+    let log_dir = match &command {
         Commands::Local(_) => "local_proxy_logs",
         Commands::Remote(_) => "remote_proxy_logs",
     };
 
     let _log = TracingLogger::new(log_dir, env!("CARGO_PKG_NAME"), level, "info")?.init()?;
-    match opts.command {
+    match command {
         Commands::Local(o) => {
             start::<LocalProxy>(o).await?;
         }
@@ -84,13 +75,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Fill `dst` from `src` only when `dst` is `None` (i.e. not set on the CLI).
-fn merge_opt<T>(dst: &mut Option<T>, src: Option<T>) {
-    if dst.is_none() {
-        *dst = src;
-    }
 }
 
 async fn start<P: Proxy>(opts: P::Options) -> Result<()> {

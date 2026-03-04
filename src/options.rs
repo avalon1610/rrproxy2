@@ -1,8 +1,23 @@
 use clap::ArgAction;
 use clap::Parser;
 use clap::Subcommand;
+use merge_derive::Merge;
 use serde::Deserialize;
 use std::path::PathBuf;
+
+// ── Merge support ─────────────────────────────────────────────────────────────
+/// Merge two option sets: `self` (CLI) wins over `other` (config file).
+pub(crate) trait Merge {
+    fn merge(&mut self, other: Self);
+}
+
+impl<T> Merge for Option<T> {
+    fn merge(&mut self, other: Self) {
+        if self.is_none() {
+            *self = other;
+        }
+    }
+}
 
 // ── Default values ────────────────────────────────────────────────────────────
 pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
@@ -22,11 +37,13 @@ pub(crate) struct Options {
     pub(crate) verbose: u8,
 
     /// Path to a TOML config file. Command-line options take priority over config file values.
-    #[arg(long, global = true)]
+    /// When a config file is provided, the subcommand (local/remote) may be omitted;
+    /// the mode is inferred from whichever of [local] / [remote] is present in the file.
+    #[arg(long, short, global = true)]
     pub(crate) config: Option<PathBuf>,
 
     #[command(subcommand)]
-    pub(crate) command: Commands,
+    pub(crate) command: Option<Commands>,
 }
 
 // ── Config file (reuses the same option structs) ──────────────────────────────
@@ -63,7 +80,7 @@ pub(crate) enum Commands {
 }
 
 // ── Shared options ────────────────────────────────────────────────────────────
-#[derive(Debug, Default, Parser, Deserialize)]
+#[derive(Debug, Default, Parser, Deserialize, Merge)]
 pub(crate) struct CommonOptions {
     /// The address to listen on (default: 127.0.0.1:8080)
     #[arg(long, short)]
@@ -87,7 +104,7 @@ pub(crate) struct CommonOptions {
 }
 
 // ── Local mode ────────────────────────────────────────────────────────────────
-#[derive(Debug, Default, Parser, Deserialize)]
+#[derive(Debug, Default, Parser, Deserialize, Merge)]
 pub(crate) struct LocalModeOptions {
     #[command(flatten)]
     #[serde(flatten)]
@@ -137,7 +154,7 @@ pub(crate) struct LocalModeOptions {
 }
 
 // ── Remote mode ───────────────────────────────────────────────────────────────
-#[derive(Debug, Default, Parser, Deserialize)]
+#[derive(Debug, Default, Parser, Deserialize, Merge)]
 pub(crate) struct RemoteModeOptions {
     #[command(flatten)]
     #[serde(flatten)]
