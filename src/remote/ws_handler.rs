@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use tokio::sync::Mutex;
 use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, protocol::Role},
@@ -19,6 +20,11 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 type Transactions = HashMap<Uuid, (usize, BTreeMap<usize, Vec<u8>>, Instant)>;
+type WsSink = futures_util::stream::SplitSink<
+    WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
+    Message,
+>;
+
 pub(crate) async fn handle_ws_upgrade(
     request: Request<Incoming>,
     cipher: Arc<Cipher>,
@@ -28,13 +34,17 @@ pub(crate) async fn handle_ws_upgrade(
     let stream = on(request).await?;
     let io = TokioIo::new(stream);
 
-    // Create WebSocket from already-upgraded connection
-    let mut ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+    // Create WebSocket from already-upgraded connection and split into reader/writer.
+    // The writer is shared via Arc<Mutex<>> so spawned tasks can send responses
+    // concurrently without blocking the read loop.
+    let ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+    let (sink, mut reader) = ws.split();
+    let sink: Arc<Mutex<WsSink>> = Arc::new(Mutex::new(sink));
 
     // Track ongoing transactions: uuid -> (total_chunks, received_chunks, start_time)
     let mut transactions: Transactions = HashMap::new();
 
-    while let Some(msg) = ws.next().await {
+    while let Some(msg) = reader.next().await {
         match msg {
             Ok(Message::Binary(data)) => {
                 if data.is_empty() {
@@ -108,50 +118,55 @@ pub(crate) async fn handle_ws_upgrade(
                                     raw.put_slice(chunk);
                                 }
 
-                                // Forward request
-                                let response_bytes = match forward_request(
-                                    raw.freeze().to_vec(),
-                                    &client,
-                                    uuid,
-                                    start,
-                                )
-                                .await
-                                {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        warn!("Failed to forward request: {e:?}");
-                                        transactions.remove(&uuid);
-                                        continue;
-                                    }
-                                };
-
-                                // Encrypt and send response
-                                let encrypted = match cipher.encrypt(&response_bytes) {
-                                    Ok(e) => e,
-                                    Err(e) => {
-                                        warn!("Failed to encrypt response: {e:?}");
-                                        transactions.remove(&uuid);
-                                        continue;
-                                    }
-                                };
-
-                                let encoded = if no_base64 {
-                                    encrypted
-                                } else {
-                                    Base64::encode_string(&encrypted).into_bytes()
-                                };
-
-                                let mut frame = Vec::with_capacity(1 + 16 + encoded.len());
-                                frame.push(0x03u8);
-                                frame.extend_from_slice(uuid.as_bytes());
-                                frame.extend_from_slice(&encoded);
-
-                                if let Err(e) = ws.send(Message::Binary(frame.into())).await {
-                                    warn!("Failed to send response: {e:?}");
-                                    break;
-                                }
-
                                 transactions.remove(&uuid);
+
+                                // Spawn a task so the read loop is never blocked by
+                                // the upstream HTTP request or the response write-back.
+                                let cipher = cipher.clone();
+                                let client = client.clone();
+                                let sink = sink.clone();
+                                tokio::spawn(async move {
+                                    let response_bytes = match forward_request(
+                                        raw.freeze().to_vec(),
+                                        &client,
+                                        uuid,
+                                        start,
+                                    )
+                                    .await
+                                    {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            warn!("Failed to forward request: {e:?}");
+                                            return;
+                                        }
+                                    };
+
+                                    // Encrypt and send response
+                                    let encrypted = match cipher.encrypt(&response_bytes) {
+                                        Ok(e) => e,
+                                        Err(e) => {
+                                            warn!("Failed to encrypt response: {e:?}");
+                                            return;
+                                        }
+                                    };
+
+                                    let encoded = if no_base64 {
+                                        encrypted
+                                    } else {
+                                        Base64::encode_string(&encrypted).into_bytes()
+                                    };
+
+                                    let mut frame = Vec::with_capacity(1 + 16 + encoded.len());
+                                    frame.push(0x03u8);
+                                    frame.extend_from_slice(uuid.as_bytes());
+                                    frame.extend_from_slice(&encoded);
+
+                                    if let Err(e) =
+                                        sink.lock().await.send(Message::Binary(frame.into())).await
+                                    {
+                                        warn!("Failed to send response: {e:?}");
+                                    }
+                                });
                             }
                         }
                     }
