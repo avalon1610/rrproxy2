@@ -129,6 +129,11 @@ pub(crate) struct LocalModeOptions {
     /// The directory to cache the server certificate (default: cert_cache)
     #[arg(long)]
     pub(crate) cache_dir: Option<PathBuf>,
+
+    /// Force remote forwarding for requests whose URL contains any of these keywords.
+    /// Can be specified multiple times or as comma-separated values. Acts like --full for matching requests.
+    #[arg(long, num_args = 1.., value_delimiter = ',')]
+    pub(crate) remote_keywords: Option<Vec<String>>,
 }
 
 // ── Remote mode ───────────────────────────────────────────────────────────────

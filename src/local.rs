@@ -151,9 +151,19 @@ impl LocalProxy {
             .map(|b| b.check(&uri))
             .unwrap_or_default();
 
+        let keyword_match = self
+            .opts
+            .remote_keywords
+            .as_deref()
+            .is_some_and(|kws| {
+                let url_str = uri.to_string();
+                kws.iter().any(|kw| !kw.is_empty() && url_str.contains(kw.as_str()))
+            });
+
         let chunk = self.opts.chunk.unwrap_or(DEFAULT_CHUNK);
         let response = if !bypass
-            && (self.opts.full.unwrap_or(false)
+            && (keyword_match
+                || self.opts.full.unwrap_or(false)
                 || size_hint.lower() as usize > chunk
                 || size_hint.upper().is_some_and(|u| u as usize > chunk))
         {
