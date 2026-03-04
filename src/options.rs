@@ -39,7 +39,7 @@ pub(crate) struct Options {
     /// Path to a TOML config file. Command-line options take priority over config file values.
     /// When a config file is provided, the subcommand (local/remote) may be omitted;
     /// the mode is inferred from whichever of [local] / [remote] is present in the file.
-    #[arg(long, short, global = true)]
+    #[arg(long, short)]
     pub(crate) config: Option<PathBuf>,
 
     #[command(subcommand)]
