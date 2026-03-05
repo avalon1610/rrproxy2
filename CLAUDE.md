@@ -67,9 +67,10 @@ just release                   # build all targets + zip (alias: just r)
 - `src/crypto.rs` — `Cipher` struct: ChaCha20-Poly1305 with BLAKE3 key derivation, random 12-byte nonce prepended to ciphertext
 - `src/convert.rs` — reqwest↔hyper response conversion, `CipherHelper` trait for encrypt/decrypt, hop-by-hop header removal
 - `src/header.rs` — header name/value obfuscation (bidirectional mapping)
+- `src/tls.rs` — shared TLS utilities: PEM parsing (`tls_parts_from_pem`) and `TlsAcceptor` construction (`tls_acceptor_from_parts`), used by both local and remote
 - `src/local.rs` — LocalProxy implementation
   - `local/forward.rs` — chunk splitting, concurrent sending via `FuturesUnordered` (HTTP mode)
-  - `local/ws_forward.rs` — WebSocket transport: persistent connection manager, request serialization, UUID-based multiplexing
+  - `local/ws_forward.rs` — WebSocket transport: `WsConnectionManager` (persistent connection manager with `ConnectionState` enum, ping keepalive every 30 s, auto-reconnect up to 3 retries), `WsForwarder` (request serialization, UUID-based multiplexing)
   - `local/tls.rs` — TLS interception (CONNECT handling)
   - `local/cert.rs` — dynamic cert generation with LRU cache (max 2048)
   - `local/bypass.rs` — CIDR/domain bypass rules
@@ -87,7 +88,7 @@ just release                   # build all targets + zip (alias: just r)
 - Custom headers disguised as common HTTP headers (e.g., `X-Referer` carries encrypted original URL) — HTTP mode only
 - Structured logging via `tracing` crate, file output to `*_proxy_logs/` directories
 - External `misc` crate (git dep) provides `TracingLogger`
-- WebSocket mode: binary frame protocol, UUID-based request multiplexing
+- WebSocket mode: binary frame protocol, UUID-based request multiplexing; `WsConnectionManager` tracks connection health via `ConnectionState` (`Connected` / `Disconnected` / `Reconnecting`), sends a keepalive Ping every 30 s (`spawn_ping_task`), and auto-reconnects (up to 3 retries, 1 s delay) on failure; `send_request()` waits up to 30 s for the connection to be ready before sending
 - WebSocket proxy support: HTTP CONNECT tunneling with proper header consumption before handshake
 
 ## Rust Edition

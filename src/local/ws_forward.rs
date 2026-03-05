@@ -64,15 +64,14 @@ impl WsConnectionManager {
         let sink = Arc::new(Mutex::new(sink));
 
         // Spawn initial ping keepalive task
-        *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone(), reconnect_tx.clone()));
+        *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone()));
 
         {
             // Spawn reader task
             let pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>> = pending.clone();
             let state = state.clone();
-            let reconnect = reconnect_tx.clone();
             tokio::spawn(async move {
-                Self::reader_loop(reader, pending, state, reconnect).await;
+                Self::reader_loop(reader, pending, state).await;
             });
         }
 
@@ -83,12 +82,10 @@ impl WsConnectionManager {
             let state = state.clone();
             let remote_addr = remote_addr.clone();
             let proxy = proxy.clone();
-            let reconnect_tx = reconnect_tx.clone();
             let ping_handle_clone = ping_handle.clone();
             tokio::spawn(async move {
                 Self::reconnection_handler(
                     reconnect_rx,
-                    reconnect_tx,
                     sink_clone,
                     pending,
                     state,
@@ -266,7 +263,6 @@ impl WsConnectionManager {
         mut reader: WsReader,
         pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
         state: Arc<Mutex<ConnectionState>>,
-        reconnect_tx: mpsc::Sender<()>,
     ) {
         loop {
             match reader.next().await {
@@ -302,7 +298,8 @@ impl WsConnectionManager {
             }
         }
 
-        // Connection lost — mark disconnected, fail all pending requests, trigger reconnect
+        // Connection lost — mark disconnected and fail all pending requests.
+        // Reconnect will be triggered lazily by the next send_request call.
         *state.lock().await = ConnectionState::Disconnected;
 
         let mut pending = pending.lock().await;
@@ -311,16 +308,13 @@ impl WsConnectionManager {
             warn!("Dropping {count} pending WebSocket request(s) due to disconnection");
             pending.clear(); // Dropping senders causes receivers to get RecvError
         }
-        drop(pending);
-
-        let _ = reconnect_tx.send(()).await;
     }
 
     /// Spawn a periodic ping task. Returns a `JoinHandle` that can be `.abort()`ed
     /// when the connection drops or is replaced. The task sends a WebSocket Ping
     /// every `PING_INTERVAL` seconds; if the send fails it triggers a reconnect and
     /// exits, so no task leak occurs even without an explicit abort.
-    fn spawn_ping_task(sink: Arc<Mutex<WsSink>>, reconnect_tx: mpsc::Sender<()>) -> JoinHandle<()> {
+    fn spawn_ping_task(sink: Arc<Mutex<WsSink>>) -> JoinHandle<()> {
         const PING_INTERVAL: Duration = Duration::from_secs(30);
         tokio::spawn(async move {
             loop {
@@ -329,8 +323,10 @@ impl WsConnectionManager {
                 match sink.send(Message::Ping(vec![].into())).await {
                     Ok(()) => trace!("Sent WebSocket keepalive ping"),
                     Err(e) => {
-                        warn!("WebSocket ping failed ({e}), triggering reconnect");
-                        let _ = reconnect_tx.send(()).await;
+                        // The reader loop will detect the broken connection and
+                        // set the state to Disconnected; reconnect is triggered
+                        // lazily by the next send_request call.
+                        warn!("WebSocket ping failed ({e}), stopping ping task");
                         break;
                     }
                 }
@@ -340,7 +336,6 @@ impl WsConnectionManager {
 
     async fn reconnection_handler(
         mut reconnect_rx: mpsc::Receiver<()>,
-        reconnect_tx: mpsc::Sender<()>,
         sink: Arc<Mutex<WsSink>>,
         pending: Arc<Mutex<HashMap<Uuid, oneshot::Sender<Vec<u8>>>>>,
         state: Arc<Mutex<ConnectionState>>,
@@ -375,21 +370,13 @@ impl WsConnectionManager {
                         if let Some(old) = ping_handle.lock().await.take() {
                             old.abort();
                         }
-                        *ping_handle.lock().await =
-                            Some(Self::spawn_ping_task(sink.clone(), reconnect_tx.clone()));
+                        *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone()));
 
                         // Spawn new reader loop
                         let pending_clone = pending.clone();
                         let state_clone = state.clone();
-                        let reconnect_tx_clone = reconnect_tx.clone();
                         tokio::spawn(async move {
-                            Self::reader_loop(
-                                new_reader,
-                                pending_clone,
-                                state_clone,
-                                reconnect_tx_clone,
-                            )
-                            .await;
+                            Self::reader_loop(new_reader, pending_clone, state_clone).await;
                         });
 
                         *state.lock().await = ConnectionState::Connected;
