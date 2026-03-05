@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{net::SocketAddr, time::Instant};
 
 use crate::{
     convert::{Decryptor, ResponseConverter},
@@ -128,14 +128,14 @@ impl Forwarder {
         })
     }
 
-    pub(crate) async fn apply(self) -> Result<Response<Full<Bytes>>> {
+    pub(crate) async fn apply(self, addr: SocketAddr) -> Result<Response<Full<Bytes>>> {
         let id = Uuid::new_v4().to_string();
         let url = build_full_url(self.is_https, &self.parts)?;
 
         let mut headers = self.parts.headers;
 
         let now = Instant::now();
-        info!("[{id}] transaction begins");
+        info!("[{id}] transaction begins ({})", addr);
 
         Obfuscator::encode(&mut headers)?;
 

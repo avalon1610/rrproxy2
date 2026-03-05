@@ -492,6 +492,7 @@ impl WsForwarder {
         body: Incoming,
         opts: &LocalModeOptions,
         is_https: bool,
+        addr: std::net::SocketAddr,
     ) -> Result<Self> {
         let body = body.collect().await?.to_bytes();
         let url = build_full_url(is_https, &parts)?;
@@ -565,7 +566,7 @@ impl WsForwarder {
         let uuid = Uuid::new_v4();
         let start = Instant::now();
 
-        info!("[{uuid}] WS transaction begins");
+        info!("[{uuid}] WS transaction begins ({})", addr);
 
         Ok(Self {
             chunks,

@@ -110,12 +110,12 @@ impl Proxy for LocalProxy {
             &Method::CONNECT => {
                 info!("CONNECT request from {}", addr);
                 // Handle HTTPS CONNECT request
-                self.handle_connect(req).await
+                self.handle_connect(req, addr).await
             }
             _ => {
                 info!("{} request from {}", req.method(), addr);
                 // Handle regular HTTP requests
-                self.handle_request(req, false).await
+                self.handle_request(req, false, addr).await
             }
         };
 
@@ -151,6 +151,7 @@ impl LocalProxy {
         &self,
         req: Request<Incoming>,
         is_https: bool,
+        addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>> {
         let size_hint = req.body().size_hint();
         trace!("size hint: {:?}", size_hint);
@@ -181,14 +182,14 @@ impl LocalProxy {
                     .ws_manager
                     .as_ref()
                     .expect("ws_manager should be initialized in websocket mode");
-                WsForwarder::new(parts, body, &self.opts, is_https)
+                WsForwarder::new(parts, body, &self.opts, is_https, addr)
                     .await?
                     .apply(manager)
                     .await?
             } else {
                 Forwarder::new(parts, body, &self.opts, is_https, self.client().clone())
                     .await?
-                    .apply()
+                    .apply(addr)
                     .await?
             }
         } else {
