@@ -26,7 +26,7 @@ use tokio::{
     task::JoinHandle,
     time::sleep,
 };
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::Message, tungstenite::protocol::WebSocketConfig};
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
@@ -139,12 +139,18 @@ impl WsConnectionManager {
                 let stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
                 let tls_stream = cx.connect(host, stream).await?;
                 let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
-                let (ws, _) = tokio_tungstenite::client_async(ws_url.clone(), maybe_tls)
+                let mut cfg = WebSocketConfig::default();
+                cfg.max_message_size = None;
+                cfg.max_frame_size = None;
+                let (ws, _) = tokio_tungstenite::client_async_with_config(ws_url.clone(), maybe_tls, Some(cfg))
                     .await
                     .context("connect websocket directly error")?;
                 ws
             } else {
-                let (ws, _) = connect_async(&ws_url)
+                let mut cfg = WebSocketConfig::default();
+                cfg.max_message_size = None;
+                cfg.max_frame_size = None;
+                let (ws, _) = connect_async_with_config(&ws_url, Some(cfg), false)
                     .await
                     .context("connect websocket directly error")?;
                 ws
@@ -242,7 +248,10 @@ impl WsConnectionManager {
             debug!("TLS established, performing WebSocket handshake");
             // Wrap in MaybeTlsStream
             let maybe_tls = MaybeTlsStream::NativeTls(tls_stream);
-            let (ws, resp) = tokio_tungstenite::client_async(ws_url, maybe_tls)
+            let mut cfg = WebSocketConfig::default();
+            cfg.max_message_size = None;
+            cfg.max_frame_size = None;
+            let (ws, resp) = tokio_tungstenite::client_async_with_config(ws_url, maybe_tls, Some(cfg))
                 .await
                 .context("websocket tls connect error")?;
             debug!("WebSocket handshake response status: {:?}", resp.status());
@@ -251,7 +260,10 @@ impl WsConnectionManager {
             debug!("Performing WebSocket handshake (plain)");
             // For ws://, use plain connection wrapped in MaybeTlsStream
             let maybe_tls = MaybeTlsStream::Plain(stream);
-            let (ws, resp) = tokio_tungstenite::client_async(ws_url, maybe_tls)
+            let mut cfg = WebSocketConfig::default();
+            cfg.max_message_size = None;
+            cfg.max_frame_size = None;
+            let (ws, resp) = tokio_tungstenite::client_async_with_config(ws_url, maybe_tls, Some(cfg))
                 .await
                 .context("websocket connect error")?;
             debug!("WebSocket handshake response status: {:?}", resp.status());

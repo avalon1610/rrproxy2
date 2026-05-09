@@ -14,7 +14,7 @@ use std::{
 use tokio::sync::Mutex;
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Message, protocol::Role},
+    tungstenite::{Message, protocol::{Role, WebSocketConfig}},
 };
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -37,7 +37,13 @@ pub(crate) async fn handle_ws_upgrade(
     // Create WebSocket from already-upgraded connection and split into reader/writer.
     // The writer is shared via Arc<Mutex<>> so spawned tasks can send responses
     // concurrently without blocking the read loop.
-    let ws = WebSocketStream::from_raw_socket(io, Role::Server, None).await;
+    let ws = WebSocketStream::from_raw_socket(io, Role::Server, {
+        let mut cfg = WebSocketConfig::default();
+        cfg.max_message_size = None;
+        cfg.max_frame_size = None;
+        Some(cfg)
+    })
+    .await;
     let (sink, mut reader) = ws.split();
     let sink: Arc<Mutex<WsSink>> = Arc::new(Mutex::new(sink));
 
