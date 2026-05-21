@@ -214,7 +214,12 @@ async fn forward_request(
 
     debug!("[{}] WS forward {} {}", uuid, method, path);
 
-    const HOP_BY_HOP: &[&str] = &[
+    // Headers that must be stripped before forwarding via reqwest+HTTP/2:
+    // - Hop-by-hop headers (forbidden in HTTP/2 per RFC 9113 §8.2.2)
+    // - `host`: reqwest derives :authority from URL; forwarding host duplicates it
+    // - `content-length`: reqwest recomputes; mismatch with END_STREAM = PROTOCOL_ERROR
+    // - `accept-encoding`: reqwest's gzip feature auto-adds it
+    const STRIP_HEADERS: &[&str] = &[
         "connection",
         "transfer-encoding",
         "upgrade",
@@ -222,14 +227,26 @@ async fn forward_request(
         "keep-alive",
         "te",
         "trailer",
+        "host",
+        "content-length",
+        "accept-encoding",
     ];
 
     let mut builder = client.request(method.parse()?, path);
+    let mut forwarded_headers: Vec<(String, String)> = Vec::new();
     for h in req.headers.iter() {
-        if !HOP_BY_HOP.iter().any(|&name| name.eq_ignore_ascii_case(h.name)) {
+        if !STRIP_HEADERS.iter().any(|&name| name.eq_ignore_ascii_case(h.name)) {
             builder = builder.header(h.name, h.value);
+            forwarded_headers.push((
+                h.name.to_string(),
+                String::from_utf8_lossy(h.value).to_string(),
+            ));
         }
     }
+    debug!(
+        "[{}] WS forward headers ({} {}): {:?}",
+        uuid, method, path, forwarded_headers
+    );
 
     let body = raw[body_offset..].to_vec();
     let response = builder.body(body).send().await?;
