@@ -214,9 +214,21 @@ async fn forward_request(
 
     debug!("[{}] WS forward {} {}", uuid, method, path);
 
+    const HOP_BY_HOP: &[&str] = &[
+        "connection",
+        "transfer-encoding",
+        "upgrade",
+        "proxy-connection",
+        "keep-alive",
+        "te",
+        "trailer",
+    ];
+
     let mut builder = client.request(method.parse()?, path);
     for h in req.headers.iter() {
-        builder = builder.header(h.name, h.value);
+        if !HOP_BY_HOP.iter().any(|&name| name.eq_ignore_ascii_case(h.name)) {
+            builder = builder.header(h.name, h.value);
+        }
     }
 
     let body = raw[body_offset..].to_vec();
