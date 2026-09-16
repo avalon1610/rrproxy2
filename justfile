@@ -5,10 +5,10 @@ debug_remote:
     cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 
 
 debug_local_ws:
-    cargo run -- -v local -l 0.0.0.0:8080 -f -w -c 200 -r https://172.29.3.67:8081
+    cargo run -- -v local -l 0.0.0.0:8080 -f -w -c 200 -r https://172.29.3.67:8081 --token think_in_the_rain
 
 debug_remote_ws:
-    cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 -w --tls
+    cargo run -- -v remote -l 0.0.0.0:8081 -p http://10.34.7.51:80 -w --tls --token think_in_the_rain
 
 release_windows:
     cargo xwin build -r --target=x86_64-pc-windows-msvc

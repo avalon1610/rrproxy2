@@ -14,6 +14,11 @@ pub(crate) struct Transaction {
     headers: HeaderMap,
     info: Info,
     cache: BTreeMap<usize, Bytes>,
+    /// Running sum of buffered chunk bytes (O(1) updates; the BTreeMap is
+    /// intentionally NOT rescanned per chunk).
+    cached: usize,
+    /// Last chunk-arrival time: refreshed on update so slow-but-legitimate
+    /// large uploads are not evicted mid-flight by the stale sweep.
     pub(crate) start: Instant,
 }
 
@@ -28,17 +33,34 @@ impl Transaction {
         Ok(Transaction {
             headers,
             info,
+            cached: cache.values().map(|c| c.len()).sum(),
             cache,
             start: Instant::now(),
         })
     }
 
     pub(crate) fn update(&mut self, chunk_index: usize, body: Bytes) {
-        self.cache.insert(chunk_index, body);
+        // Same-index insert replaces (caller checks duplicates first); correct
+        // the running sum for a replaced chunk.
+        if let Some(old) = self.cache.insert(chunk_index, body) {
+            self.cached = self.cached.saturating_sub(old.len());
+        }
+        self.cached += self
+            .cache
+            .get(&chunk_index)
+            .map(|c| c.len())
+            .unwrap_or(0);
+        // Refresh activity so a slow-but-legitimate large upload is not
+        // evicted mid-flight by the stale-transaction sweep.
+        self.start = Instant::now();
     }
 
     pub(crate) fn has_chunk(&self, chunk_index: usize) -> bool {
         self.cache.contains_key(&chunk_index)
+    }
+    /// Total buffered body bytes across all received chunks (running sum).
+    pub(crate) fn cached_bytes(&self) -> usize {
+        self.cached
     }
 
     pub(crate) fn commit(self) -> Result<TransactionState> {

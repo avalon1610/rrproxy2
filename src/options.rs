@@ -101,6 +101,24 @@ pub(crate) struct CommonOptions {
     /// Disable base64 encoding/decoding for encrypted data (default: enabled)
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_base64: Option<bool>,
+
+    /// Maximum accepted request body size in bytes (default: 16777216)
+    #[arg(long)]
+    pub(crate) max_body: Option<usize>,
+
+    /// Seconds before an incomplete transaction (WebSocket or HTTP mode) is discarded (default: 60)
+    #[arg(long)]
+    pub(crate) transaction_timeout: Option<u64>,
+
+    /// Maximum concurrent requests served per client IP (default: 32)
+    #[arg(long)]
+    pub(crate) max_conns_per_ip: Option<usize>,
+
+    /// Maximum WebSocket frame size in bytes accepted by the remote in
+    /// websocket mode. Must be >= the local client's --chunk size
+    /// (default: 1048576 = 1 MiB)
+    #[arg(long)]
+    pub(crate) max_frame: Option<usize>,
 }
 
 // ── Local mode ────────────────────────────────────────────────────────────────

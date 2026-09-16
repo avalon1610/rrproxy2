@@ -9,8 +9,17 @@ use reqwest::Client;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
+use crate::remote::MAX_TOTAL_CHUNKS;
+
+/// Upper bound on concurrently pending transactions per WebSocket connection.
+const MAX_PENDING_WS_TRANSACTIONS: usize = 256;
+/// Per-transaction buffered-byte budget (mirrors HTTP MAX_PENDING_BYTES scaled
+/// for one transaction; must be >= the local proxy's --chunk total body size).
+const MAX_WS_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
+/// Connection-wide buffered-byte budget across all pending transactions.
+const MAX_WS_CONN_BYTES: usize = 256 * 1024 * 1024;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{
     WebSocketStream,
@@ -19,7 +28,8 @@ use tokio_tungstenite::{
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-type Transactions = HashMap<Uuid, (usize, BTreeMap<usize, Vec<u8>>, Instant)>;
+/// uuid -> (total_chunks, chunks, txn_start, last_activity, buffered_bytes)
+type Transactions = HashMap<Uuid, (usize, BTreeMap<usize, Vec<u8>>, Instant, Instant, usize)>;
 type WsSink = futures_util::stream::SplitSink<
     WebSocketStream<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>>,
     Message,
@@ -30,6 +40,8 @@ pub(crate) async fn handle_ws_upgrade(
     cipher: Arc<Cipher>,
     client: Client,
     no_base64: bool,
+    max_frame_size: usize,
+    transaction_timeout: Duration,
 ) -> Result<()> {
     let stream = on(request).await?;
     let io = TokioIo::new(stream);
@@ -39,16 +51,25 @@ pub(crate) async fn handle_ws_upgrade(
     // concurrently without blocking the read loop.
     let ws = WebSocketStream::from_raw_socket(io, Role::Server, {
         let mut cfg = WebSocketConfig::default();
-        cfg.max_message_size = None;
-        cfg.max_frame_size = None;
+        // Bounds incoming frames/messages: an uncapped receiver lets a single
+        // malicious frame OOM the process. Sizing rule: must be >= the local
+        // client's --chunk value (which the local side uses to split requests),
+        // configured via remote --max-frame.
+        cfg.max_frame_size = Some(max_frame_size);
+        cfg.max_message_size = Some(max_frame_size);
         Some(cfg)
     })
     .await;
     let (sink, mut reader) = ws.split();
     let sink: Arc<Mutex<WsSink>> = Arc::new(Mutex::new(sink));
 
-    // Track ongoing transactions: uuid -> (total_chunks, received_chunks, start_time)
+    // Track ongoing transactions: uuid -> (total_chunks, chunks, txn_start,
+    // last_activity, buffered_bytes)
     let mut transactions: Transactions = HashMap::new();
+    // Connection-wide buffered-byte budget: per-transaction caps alone allow
+    // MAX_PENDING_WS_TRANSACTIONS x MAX_WS_TRANSACTION_BYTES to accumulate.
+    let mut conn_buffered_bytes: usize = 0;
+    let mut last_sweep = Instant::now();
 
     while let Some(msg) = reader.next().await {
         match msg {
@@ -74,7 +95,33 @@ pub(crate) async fn handle_ws_upgrade(
                         }) as usize;
 
                         info!("[{}] WS transaction begins, chunks: {}", uuid, total);
-                        transactions.insert(uuid, (total, BTreeMap::new(), Instant::now()));
+
+                        // Expire stale transactions so an attacker cannot grow the
+                        // map forever by sending metadata frames that never complete.
+                        if last_sweep.elapsed() >= transaction_timeout {
+                            transactions
+                                .retain(|_, (_, _, _, last_active, _)| {
+                                    last_active.elapsed() < transaction_timeout
+                                });
+                            // Recompute the connection total from what survived
+                            // the sweep: retained transactions keep their bytes,
+                            // evicted ones are dropped from the accounting too.
+                            conn_buffered_bytes = transactions
+                                .values()
+                                .map(|(_, _, _, _, buffered)| *buffered)
+                                .sum();
+                            last_sweep = Instant::now();
+                        }
+                        if transactions.len() >= MAX_PENDING_WS_TRANSACTIONS {
+                            warn!("Too many pending WS transactions, rejecting {}", uuid);
+                            continue;
+                        }
+                        if total == 0 || total > MAX_TOTAL_CHUNKS {
+                            continue;
+                        }
+
+                        let now = Instant::now();
+                        transactions.insert(uuid, (total, BTreeMap::new(), now, now, 0));
                     }
                     0x02 => {
                         // Chunk frame: [type][uuid][chunk_index LE][encrypted chunk]
@@ -111,7 +158,26 @@ pub(crate) async fn handle_ws_upgrade(
                             }
                         };
 
-                        if let Some((total, chunks, start)) = transactions.get_mut(&uuid) {
+                        if let Some((total, chunks, start, last_active, buffered)) =
+                            transactions.get_mut(&uuid)
+                        {
+                            if index >= *total {
+                                continue;
+                            }
+                            *buffered += decrypted.len();
+                            conn_buffered_bytes += decrypted.len();
+                            if *buffered > MAX_WS_TRANSACTION_BYTES
+                                || conn_buffered_bytes > MAX_WS_CONN_BYTES
+                            {
+                                warn!(
+                                    "[{}] WS byte budget exceeded (txn or connection), dropping",
+                                    uuid
+                                );
+                                conn_buffered_bytes -= *buffered;
+                                transactions.remove(&uuid);
+                                continue;
+                            }
+                            *last_active = Instant::now();
                             chunks.insert(index, decrypted);
 
                             // Check if all chunks received
@@ -124,6 +190,7 @@ pub(crate) async fn handle_ws_upgrade(
                                     raw.put_slice(chunk);
                                 }
 
+                                conn_buffered_bytes -= *buffered;
                                 transactions.remove(&uuid);
 
                                 // Spawn a task so the read loop is never blocked by

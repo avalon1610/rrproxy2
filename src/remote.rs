@@ -24,10 +24,28 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, trace, warn};
+
+/// Default maximum WebSocket frame size accepted (1 MiB). Override with
+/// --max-frame; must be >= the local client's --chunk value.
+pub(crate) const DEFAULT_MAX_FRAME_SIZE: usize = 1024 * 1024;
+
+/// Maximum accepted request body size (encrypted, base64-encoded). Real chunks
+/// are bounded by the local proxy's --chunk (default 10 KiB); this cap only
+/// bounds attacker-controlled allocation before any meaningful work happens.
+pub(crate) const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+/// Incomplete transactions older than this are evicted on the next request.
+pub(crate) const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound on concurrently pending (incomplete) transactions.
+pub(crate) const MAX_PENDING_TRANSACTIONS: usize = 1024;
+/// Upper bound on total bytes buffered across all pending transactions.
+pub(crate) const MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
+/// A transaction claiming more chunks than this is rejected outright: real
+/// requests split at --chunk (10 KiB default), so this bounds map size per id.
+pub(crate) const MAX_TOTAL_CHUNKS: usize = 65536;
 
 #[derive(Clone)]
 pub(crate) struct RemoteProxy {
@@ -36,6 +54,9 @@ pub(crate) struct RemoteProxy {
     cipher: Arc<Cipher>,
     client: Client,
     no_base64: bool,
+    max_frame_size: usize,
+    max_body: usize,
+    transaction_timeout: Duration,
 }
 
 impl Proxy for RemoteProxy {
@@ -54,6 +75,17 @@ impl Proxy for RemoteProxy {
 
         let token = opts.common.token.clone().unwrap_or_else(default_token);
         let no_base64 = opts.common.no_base64.unwrap_or(false);
+        let max_frame_size = opts
+            .common
+            .max_frame
+            .unwrap_or(DEFAULT_MAX_FRAME_SIZE);
+
+        let max_body = opts.common.max_body.unwrap_or(MAX_BODY_SIZE);
+        let transaction_timeout = Duration::from_secs(
+            opts.common
+                .transaction_timeout
+                .unwrap_or(TRANSACTION_TIMEOUT.as_secs()),
+        );
 
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
@@ -61,6 +93,9 @@ impl Proxy for RemoteProxy {
             opts: Arc::new(opts),
             client,
             no_base64,
+            max_frame_size,
+            max_body,
+            transaction_timeout,
         })
     }
 
@@ -72,6 +107,13 @@ impl Proxy for RemoteProxy {
             .as_deref()
             .unwrap_or(DEFAULT_LISTEN)
             .parse()?)
+    }
+
+    fn max_conns_per_ip(&self) -> Option<usize> {
+        // Off by default: behind Cloudflare/reverse proxies every client shares
+        // the proxy IP, so a per-IP cap would throttle all legitimate users.
+        // Enable explicitly with --max-conns-per-ip N (N > 0).
+        self.opts.common.max_conns_per_ip.filter(|&n| n > 0)
     }
 
     async fn handler(
@@ -93,11 +135,19 @@ impl Proxy for RemoteProxy {
             // Compute Sec-WebSocket-Accept
             let accept_key = compute_ws_accept_key(ws_key);
 
-            // Spawn the upgrade handler
             let no_base64 = self.no_base64;
+            let max_frame = self.max_frame_size;
+            let txn_timeout = self.transaction_timeout;
             tokio::spawn(async move {
-                if let Err(e) =
-                    ws_handler::handle_ws_upgrade(request, cipher, client, no_base64).await
+                if let Err(e) = ws_handler::handle_ws_upgrade(
+                    request,
+                    cipher,
+                    client,
+                    no_base64,
+                    max_frame,
+                    txn_timeout,
+                )
+                .await
                 {
                     warn!("ws error: {e:?}");
                 }
@@ -148,7 +198,23 @@ impl RemoteProxy {
         let now = Instant::now();
         let info = Info::parse(&mut request, &self.cipher)?;
         let (parts, body) = request.into_parts();
-        let body = body.collect().await?.to_bytes();
+        // Bound memory before touching the body: hyper gives no built-in size
+        // limit on Incoming, and a plain collect() would buffer a chunked
+        // (Content-Length-less) body in full before any check. Limited aborts
+        // mid-stream once the cap is exceeded.
+        if parts
+            .headers
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+            .is_some_and(|len| len > self.max_body)
+        {
+            anyhow::bail!("request body too large");
+        }
+        let body = match http_body_util::Limited::new(body, self.max_body).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => anyhow::bail!("request body too large"),
+        };
         debug!(
             "[{}] parsed info {:?} body len: {}",
             info.id,
@@ -173,11 +239,31 @@ impl RemoteProxy {
             debug!("[{}] empty body", info.id);
             body
         };
-
         let id = info.id.clone();
         let chunk_index = info.chunk_index;
+        if info.total_chunks > MAX_TOTAL_CHUNKS {
+            anyhow::bail!("total_chunks too large");
+        }
+        if chunk_index >= info.total_chunks {
+            anyhow::bail!("chunk_index out of range");
+        }
         let request = {
             let mut transactions = self.transactions.lock().unwrap();
+            // Evict stale transactions: ids that never complete must not grow
+            // the map without bound.
+            transactions.retain(|_, t| t.start.elapsed() < self.transaction_timeout);
+
+            // Global buffered-bytes budget across all pending transactions.
+            // Recomputed from the map (<= MAX_PENDING_TRANSACTIONS entries,
+            // cached_bytes is O(1)) so the count is always exact — no drift,
+            // no underflow, no create/commit bookkeeping to get wrong.
+            let pending_bytes: usize = transactions.values().map(|t| t.cached_bytes()).sum();
+            let check_budget = |current: usize, incoming: usize| -> Result<()> {
+                if current + incoming > MAX_PENDING_BYTES {
+                    anyhow::bail!("too many pending transaction bytes");
+                }
+                Ok(())
+            };
 
             // Check if transaction already exists and handle race conditions
             let transaction = if let Some(mut t) = transactions.remove(&id) {
@@ -197,9 +283,20 @@ impl RemoteProxy {
                         .unwrap()); // unwrap is safe here
                 }
 
+                // t is removed from the map, so the global total must include
+                // its buffered bytes for the check; after update the map sum
+                // is recomputed on the next request.
+                check_budget(pending_bytes + t.cached_bytes(), body.len())?;
                 t.update(info.chunk_index, body);
                 t
             } else {
+                // Cap pending map size so forged ids cannot balloon memory.
+                if transactions.len() >= MAX_PENDING_TRANSACTIONS {
+                    anyhow::bail!("too many pending transactions");
+                }
+
+                check_budget(pending_bytes, body.len())?;
+
                 // new transaction, we use request's headers (which already removed our internal headers)
                 // and body (will be store in cache)
                 debug!("[{id}] new transaction created, {} bytes", body.len());
