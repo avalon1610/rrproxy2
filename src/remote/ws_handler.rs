@@ -1,4 +1,3 @@
-use crate::crypto::Cipher;
 use anyhow::{Result, anyhow};
 use base64ct::{Base64, Encoding};
 use bytes::{BufMut, BytesMut};
@@ -11,13 +10,13 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use crate::remote::MAX_TOTAL_CHUNKS;
+use crate::{
+    crypto::{Cipher, WS_AUTH_PAYLOAD},
+    remote::MAX_TOTAL_CHUNKS,
+};
 
 /// Upper bound on concurrently pending transactions per WebSocket connection.
 const MAX_PENDING_WS_TRANSACTIONS: usize = 256;
-/// Per-transaction buffered-byte budget (mirrors HTTP MAX_PENDING_BYTES scaled
-/// for one transaction; must be >= the local proxy's --chunk total body size).
-const MAX_WS_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
 /// Connection-wide buffered-byte budget across all pending transactions.
 const MAX_WS_CONN_BYTES: usize = 256 * 1024 * 1024;
 use tokio::sync::Mutex;
@@ -42,6 +41,12 @@ pub(crate) async fn handle_ws_upgrade(
     no_base64: bool,
     max_frame_size: usize,
     transaction_timeout: Duration,
+    // Per-transaction buffered-byte cap; derives from --max-body so a user
+    // raising the body limit for large uploads raises this cap implicitly.
+    max_txn_bytes: usize,
+    // Keeps the remote per-IP connection slot occupied for the lifetime of
+    // the WebSocket connection (the HTTP connection task ended at upgrade).
+    _conn_guard: Option<crate::proxy::ConnGuard>,
 ) -> Result<()> {
     let stream = on(request).await?;
     let io = TokioIo::new(stream);
@@ -67,9 +72,14 @@ pub(crate) async fn handle_ws_upgrade(
     // last_activity, buffered_bytes)
     let mut transactions: Transactions = HashMap::new();
     // Connection-wide buffered-byte budget: per-transaction caps alone allow
-    // MAX_PENDING_WS_TRANSACTIONS x MAX_WS_TRANSACTION_BYTES to accumulate.
+    // MAX_PENDING_WS_TRANSACTIONS x max_txn_bytes to accumulate.
     let mut conn_buffered_bytes: usize = 0;
     let mut last_sweep = Instant::now();
+    // The connection is unauthenticated until the client proves it holds the
+    // shared token via a 0x00 frame (see WS_AUTH_PAYLOAD). Unauthenticated
+    // connections cannot register transactions, so anonymous peers cannot
+    // allocate tracked state.
+    let mut authenticated = false;
 
     while let Some(msg) = reader.next().await {
         match msg {
@@ -79,7 +89,41 @@ pub(crate) async fn handle_ws_upgrade(
                 }
 
                 match data[0] {
-                    0x01 => {
+                    0x00 => {
+                        // Auth frame: [type][nonce][encrypted WS_AUTH_PAYLOAD].
+                        // Decrypting to the expected constant proves the sender
+                        // holds the shared token. Replies 0x05 (accepted) or
+                        // 0x06 (rejected) so the local side can fail fast on a
+                        // token mismatch instead of timing out later.
+                        let reply = match cipher.decrypt(&data[1..]) {
+                            Ok(p) if p.as_slice() == WS_AUTH_PAYLOAD => 0x05u8,
+                            Ok(_) => {
+                                warn!("WS auth payload mismatch");
+                                0x06u8
+                            }
+                            Err(e) => {
+                                warn!("WS auth failed: {e:?}");
+                                0x06u8
+                            }
+                        };
+                        if reply == 0x05 {
+                            debug!("WS connection authenticated");
+                            authenticated = true;
+                        }
+                        if sink
+                            .lock()
+                            .await
+                            .send(Message::Binary(vec![reply].into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if reply == 0x06 {
+                            break; // wrong token: drop the connection
+                        }
+                    }
+                    0x01 if authenticated => {
                         // Metadata frame: [type][uuid][total_chunks LE]
                         if data.len() < 21 {
                             continue;
@@ -94,7 +138,9 @@ pub(crate) async fn handle_ws_upgrade(
                             Err(_) => continue,
                         }) as usize;
 
-                        info!("[{}] WS transaction begins, chunks: {}", uuid, total);
+                        if total == 0 || total > MAX_TOTAL_CHUNKS {
+                            continue;
+                        }
 
                         // Expire stale transactions so an attacker cannot grow the
                         // map forever by sending metadata frames that never complete.
@@ -116,14 +162,21 @@ pub(crate) async fn handle_ws_upgrade(
                             warn!("Too many pending WS transactions, rejecting {}", uuid);
                             continue;
                         }
-                        if total == 0 || total > MAX_TOTAL_CHUNKS {
-                            continue;
-                        }
+
+                        info!("[{}] WS transaction begins, chunks: {}", uuid, total);
 
                         let now = Instant::now();
+                        // An existing entry is a client retry/restart of the same
+                        // request id: replace it and recompute the connection total
+                        // so stale bytes from the old entry don't linger in the
+                        // accounting until the next sweep.
                         transactions.insert(uuid, (total, BTreeMap::new(), now, now, 0));
+                        conn_buffered_bytes = transactions
+                            .values()
+                            .map(|(_, _, _, _, buffered)| *buffered)
+                            .sum();
                     }
-                    0x02 => {
+                    0x02 if authenticated => {
                         // Chunk frame: [type][uuid][chunk_index LE][encrypted chunk]
                         if data.len() < 21 {
                             continue;
@@ -164,9 +217,22 @@ pub(crate) async fn handle_ws_upgrade(
                             if index >= *total {
                                 continue;
                             }
-                            *buffered += decrypted.len();
-                            conn_buffered_bytes += decrypted.len();
-                            if *buffered > MAX_WS_TRANSACTION_BYTES
+                            // Insert first, then budget-check with the exact
+                            // signed delta: a re-sent (larger) chunk replaces
+                            // the stored one, so a pre-insert check could
+                            // falsely drop a transaction that fits after the
+                            // replace. i64 delta keeps the counters exactly
+                            // equal to the stored bytes (no drift either way).
+                            let new_len = decrypted.len() as i64;
+                            let old_len = chunks
+                                .insert(index, decrypted)
+                                .map(|o| o.len() as i64)
+                                .unwrap_or(0);
+                            let delta = new_len - old_len;
+                            *buffered = (*buffered as i64 + delta) as usize;
+                            conn_buffered_bytes = (conn_buffered_bytes as i64 + delta) as usize;
+                            *last_active = Instant::now();
+                            if *buffered > max_txn_bytes
                                 || conn_buffered_bytes > MAX_WS_CONN_BYTES
                             {
                                 warn!(
@@ -177,8 +243,6 @@ pub(crate) async fn handle_ws_upgrade(
                                 transactions.remove(&uuid);
                                 continue;
                             }
-                            *last_active = Instant::now();
-                            chunks.insert(index, decrypted);
 
                             // Check if all chunks received
                             if chunks.len() == *total {
@@ -242,6 +306,10 @@ pub(crate) async fn handle_ws_upgrade(
                                 });
                             }
                         }
+                    }
+                    0x01 | 0x02 => {
+                        warn!("transaction frame before auth, closing");
+                        break;
                     }
                     _ => {
                         warn!("Unknown frame type: {}", data[0]);

@@ -102,7 +102,8 @@ pub(crate) struct CommonOptions {
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) no_base64: Option<bool>,
 
-    /// Maximum accepted request body size in bytes (default: 16777216)
+    /// Maximum accepted request body size in bytes (default: 16777216).
+    /// In websocket mode this also caps each reassembled request.
     #[arg(long)]
     pub(crate) max_body: Option<usize>,
 
@@ -110,7 +111,8 @@ pub(crate) struct CommonOptions {
     #[arg(long)]
     pub(crate) transaction_timeout: Option<u64>,
 
-    /// Maximum concurrent requests served per client IP (default: 32)
+    /// Maximum concurrent connections per client IP on the remote listener.
+    /// Off by default; ignored in local mode. Enable with e.g. --max-conns-per-ip 32
     #[arg(long)]
     pub(crate) max_conns_per_ip: Option<usize>,
 

@@ -1,5 +1,5 @@
 use crate::{
-    crypto::{Cipher, default_token, package_info},
+    crypto::{Cipher, WS_AUTH_PAYLOAD, default_token, package_info},
     local::build_full_url,
     options::{DEFAULT_CHUNK, LocalModeOptions},
 };
@@ -49,21 +49,32 @@ pub(crate) struct WsConnectionManager {
 }
 
 impl WsConnectionManager {
-    pub(crate) async fn new(remote_addr: &str, proxy: Option<&str>) -> Result<Self> {
+    pub(crate) async fn new(
+        remote_addr: &str,
+        proxy: Option<&str>,
+        token: String,
+    ) -> Result<Self> {
         let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
 
         let remote_addr = remote_addr.to_string();
         let proxy = proxy.map(|s| s.to_string());
 
+        let cipher = Arc::new(Cipher::new(token));
+
         let state = Arc::new(Mutex::new(ConnectionState::Connected));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let ping_handle: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
 
-        // Initial connection
-        let (sink, reader) = Self::connect(&remote_addr, proxy.as_deref()).await?;
-        let sink = Arc::new(Mutex::new(sink));
-
-        // Spawn initial ping keepalive task
+        // Initial connection: authenticate before starting the reader task so
+        // a token mismatch fails fast (new() returns Err) instead of timing
+        // out later.
+        let ws = Self::connect(&remote_addr, proxy.as_deref()).await?;
+        let (mut reader, sink_split) = {
+            let (sink, reader) = ws.split();
+            (reader, sink)
+        };
+        let sink = Arc::new(Mutex::new(sink_split));
+        Self::send_auth(&sink, &mut reader, &cipher).await?;
         *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone()));
 
         {
@@ -83,6 +94,7 @@ impl WsConnectionManager {
             let remote_addr = remote_addr.clone();
             let proxy = proxy.clone();
             let ping_handle_clone = ping_handle.clone();
+            let cipher_clone = cipher.clone();
             tokio::spawn(async move {
                 Self::reconnection_handler(
                     reconnect_rx,
@@ -92,6 +104,7 @@ impl WsConnectionManager {
                     remote_addr,
                     proxy,
                     ping_handle_clone,
+                    cipher_clone,
                 )
                 .await;
             });
@@ -105,7 +118,51 @@ impl WsConnectionManager {
         })
     }
 
-    async fn connect(remote_addr: &str, proxy: Option<&str>) -> Result<(WsSink, WsReader)> {
+    /// Proves to the remote that this connection holds the shared token by
+    /// sending frame 0x00: [type][nonce][encrypted WS_AUTH_PAYLOAD], then
+    /// waits for the remote's ack (0x05 = accepted, 0x06 = rejected). A
+    /// rejected/failed handshake returns an error so a token mismatch fails
+    /// fast instead of surfacing as request timeouts later.
+    async fn send_auth(
+        sink: &Arc<Mutex<WsSink>>,
+        reader: &mut WsReader,
+        cipher: &Cipher,
+    ) -> Result<()> {
+        let encrypted = cipher.encrypt(WS_AUTH_PAYLOAD)?;
+        let mut frame = Vec::with_capacity(1 + encrypted.len());
+        frame.push(0x00u8);
+        frame.extend_from_slice(&encrypted);
+        sink.lock()
+            .await
+            .send(Message::Binary(frame.into()))
+            .await
+            .context("send ws auth frame error")?;
+
+        // The remote replies with a single 0x05/0x06 binary frame before any
+        // other traffic (transactions can't start before auth). Old remotes
+        // send no ack at all: time out rather than hang forever.
+        const AUTH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+        loop {
+            let msg = tokio::time::timeout(AUTH_ACK_TIMEOUT, reader.next())
+                .await
+                .context("timed out waiting for ws auth ack")?
+                .ok_or_else(|| anyhow!("ws closed while waiting for auth ack"))?
+                .context("ws error while waiting for auth ack")?;
+            match msg {
+                Message::Binary(data) if data.first() == Some(&0x05u8) => {
+                    debug!("WS auth accepted by remote");
+                    return Ok(());
+                }
+                Message::Binary(data) if data.first() == Some(&0x06u8) => {
+                    bail!("ws auth rejected: token mismatch");
+                }
+                // Pings/pongs/other control frames: keep waiting.
+                _ => continue,
+            }
+        }
+    }
+
+    async fn connect(remote_addr: &str, proxy: Option<&str>) -> Result<WsStream> {
         let ws_url = remote_addr
             .replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1);
@@ -159,7 +216,7 @@ impl WsConnectionManager {
 
         info!("WebSocket connection established to {}", ws_url);
 
-        Ok(ws.split())
+        Ok(ws)
     }
 
     async fn connect_via_proxy(ws_url: &str, proxy_url: &str) -> Result<WsStream> {
@@ -354,6 +411,7 @@ impl WsConnectionManager {
         remote_addr: String,
         proxy: Option<String>,
         ping_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+        cipher: Arc<Cipher>,
     ) {
         while reconnect_rx.recv().await.is_some() {
             // Check if already reconnecting
@@ -371,39 +429,53 @@ impl WsConnectionManager {
             const RETRY_DELAY: Duration = Duration::from_secs(1);
 
             for attempt in 1..=MAX_RETRIES {
-                debug!("Reconnection attempt {}/{}", attempt, MAX_RETRIES);
-
-                match Self::connect(&remote_addr, proxy.as_deref()).await {
-                    Ok((new_sink, new_reader)) => {
+                // Returns Ok(reader) when the connection is up and authenticated.
+                let connected: Result<WsReader> = match Self::connect(&remote_addr, proxy.as_deref())
+                    .await
+                {
+                    Ok(ws) => {
+                        let (new_sink, mut reader) = ws.split();
                         // Replace the sink
                         *sink.lock().await = new_sink;
 
-                        // Abort the stale ping task and spawn a fresh one
-                        if let Some(old) = ping_handle.lock().await.take() {
-                            old.abort();
+                        // Re-authenticate the fresh connection before any
+                        // transaction frames can be sent over it.
+                        match Self::send_auth(&sink, &mut reader, &cipher).await {
+                            Ok(()) => Ok(reader),
+                            Err(e) => {
+                                warn!("WebSocket auth after reconnect failed: {e}");
+                                Err(e)
+                            }
                         }
-                        *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone()));
-
-                        // Spawn new reader loop
-                        let pending_clone = pending.clone();
-                        let state_clone = state.clone();
-                        tokio::spawn(async move {
-                            Self::reader_loop(new_reader, pending_clone, state_clone).await;
-                        });
-
-                        *state.lock().await = ConnectionState::Connected;
-                        info!("WebSocket reconnection successful");
-                        break;
                     }
                     Err(e) => {
                         warn!("Reconnection attempt {} failed: {}", attempt, e);
-                        if attempt < MAX_RETRIES {
-                            sleep(RETRY_DELAY).await;
-                        } else {
-                            warn!("All reconnection attempts failed");
-                            *state.lock().await = ConnectionState::Disconnected;
-                        }
+                        Err(anyhow!("connect failed: {e}"))
                     }
+                };
+
+                if let Ok(new_reader) = connected {
+                    // Abort the stale ping task and spawn a fresh one
+                    if let Some(old) = ping_handle.lock().await.take() {
+                        old.abort();
+                    }
+                    *ping_handle.lock().await = Some(Self::spawn_ping_task(sink.clone()));
+
+                    // Spawn new reader loop
+                    let pending_clone = pending.clone();
+                    let state_clone = state.clone();
+                    tokio::spawn(async move {
+                        Self::reader_loop(new_reader, pending_clone, state_clone).await;
+                    });
+
+                    *state.lock().await = ConnectionState::Connected;
+                    info!("WebSocket reconnection successful");
+                    break;
+                } else if attempt < MAX_RETRIES {
+                    sleep(RETRY_DELAY).await;
+                } else {
+                    warn!("All reconnection attempts failed");
+                    *state.lock().await = ConnectionState::Disconnected;
                 }
             }
         }

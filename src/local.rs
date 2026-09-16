@@ -1,6 +1,6 @@
 use crate::{
     convert::{CipherHelper, ResponseConverter},
-    crypto::package_info,
+    crypto::{default_token, package_info},
     local::{
         bypass::Bypass,
         cert::CertManager,
@@ -84,6 +84,7 @@ impl Proxy for LocalProxy {
                 WsConnectionManager::new(
                     opts.remote.as_deref().unwrap_or(DEFAULT_REMOTE),
                     opts.common.proxy.as_deref(),
+                    opts.common.token.clone().unwrap_or_else(default_token),
                 )
                 .await?,
             ))

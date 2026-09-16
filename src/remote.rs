@@ -2,14 +2,14 @@ use crate::{
     convert::{Encryptor, ResponseConverter},
     crypto::{Cipher, default_token},
     options::{DEFAULT_LISTEN, RemoteModeOptions},
-    proxy::{COMMIT_INDEX_HEADER, Proxy},
+    proxy::{COMMIT_INDEX_HEADER, ConnGuard, ConnLimiter, Proxy},
     remote::{
         info::Info,
         transaction::{Transaction, TransactionState},
     },
 };
-use anyhow::{Context, Result, anyhow};
 use base64ct::{Base64, Encoding};
+use anyhow::{Context, Result, anyhow, bail};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, Uri,
@@ -32,6 +32,10 @@ use tracing::{debug, info, trace, warn};
 /// Default maximum WebSocket frame size accepted (1 MiB). Override with
 /// --max-frame; must be >= the local client's --chunk value.
 pub(crate) const DEFAULT_MAX_FRAME_SIZE: usize = 1024 * 1024;
+
+/// Historical default WS per-transaction buffered-byte cap; an explicit
+/// --max-body lowers it. Omitting --max-body keeps this default.
+pub(crate) const MAX_WS_TRANSACTION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Maximum accepted request body size (encrypted, base64-encoded). Real chunks
 /// are bounded by the local proxy's --chunk (default 10 KiB); this cap only
@@ -56,7 +60,13 @@ pub(crate) struct RemoteProxy {
     no_base64: bool,
     max_frame_size: usize,
     max_body: usize,
+    /// WS per-transaction buffered-byte cap (64 MiB default; an explicit
+    /// --max-body lowers it since chunks are bounded by that limit anyway).
+    max_ws_txn_bytes: usize,
     transaction_timeout: Duration,
+    /// Shared per-IP connection limiter; `None` disables the cap. Built once
+    /// so the accept loops and WS upgrades share one counter map.
+    conn_limiter: Option<ConnLimiter>,
 }
 
 impl Proxy for RemoteProxy {
@@ -75,17 +85,53 @@ impl Proxy for RemoteProxy {
 
         let token = opts.common.token.clone().unwrap_or_else(default_token);
         let no_base64 = opts.common.no_base64.unwrap_or(false);
+
+        if let Some(frame) = opts.common.max_frame {
+            if frame == 0 {
+                bail!("--max-frame must be greater than 0");
+            }
+        }
         let max_frame_size = opts
             .common
             .max_frame
             .unwrap_or(DEFAULT_MAX_FRAME_SIZE);
 
+        if let Some(max_body) = opts.common.max_body {
+            if max_body == 0 {
+                bail!("--max-body must be greater than 0");
+            }
+        }
         let max_body = opts.common.max_body.unwrap_or(MAX_BODY_SIZE);
+        // Historical WS per-txn cap is 64 MiB; an explicit --max-body lowers
+        // it (a reassembled WS request is already bounded by the same limit
+        // in HTTP mode). Omitting --max-body keeps the default.
+        let max_ws_txn_bytes = opts
+            .common
+            .max_body
+            .unwrap_or(MAX_WS_TRANSACTION_BYTES);
+
+        if let Some(secs) = opts.common.transaction_timeout {
+            if secs == 0 {
+                bail!("--transaction-timeout must be greater than 0");
+            }
+        }
         let transaction_timeout = Duration::from_secs(
             opts.common
                 .transaction_timeout
                 .unwrap_or(TRANSACTION_TIMEOUT.as_secs()),
         );
+
+        if opts.common.max_conns_per_ip == Some(0) {
+            bail!("--max-conns-per-ip must be greater than 0 (omit it to disable the limit)");
+        }
+        // Off by default: behind Cloudflare/reverse proxies every client shares
+        // the proxy IP, so a per-IP cap would throttle all legitimate users.
+        // Enable explicitly with --max-conns-per-ip N (N > 0).
+        let conn_limiter = opts
+            .common
+            .max_conns_per_ip
+            .filter(|&n| n > 0)
+            .map(ConnLimiter::new);
 
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
@@ -95,7 +141,9 @@ impl Proxy for RemoteProxy {
             no_base64,
             max_frame_size,
             max_body,
+            max_ws_txn_bytes,
             transaction_timeout,
+            conn_limiter,
         })
     }
 
@@ -109,11 +157,8 @@ impl Proxy for RemoteProxy {
             .parse()?)
     }
 
-    fn max_conns_per_ip(&self) -> Option<usize> {
-        // Off by default: behind Cloudflare/reverse proxies every client shares
-        // the proxy IP, so a per-IP cap would throttle all legitimate users.
-        // Enable explicitly with --max-conns-per-ip N (N > 0).
-        self.opts.common.max_conns_per_ip.filter(|&n| n > 0)
+    fn conn_limiter(&self) -> Option<ConnLimiter> {
+        self.conn_limiter.clone()
     }
 
     async fn handler(
@@ -138,6 +183,20 @@ impl Proxy for RemoteProxy {
             let no_base64 = self.no_base64;
             let max_frame = self.max_frame_size;
             let txn_timeout = self.transaction_timeout;
+            // WS per-transaction byte cap: only an explicit --max-body lowers
+            // the historical 64 MiB default.
+            let max_txn_bytes = self.max_ws_txn_bytes;
+            // The accept loop already holds this connection's per-IP slot.
+            // Take the guard out of the request extensions and move it into
+            // the WS handler task so the upgraded connection keeps occupying
+            // it without double-counting against the same connection.
+            let guard_holder = request
+                .extensions()
+                .get::<Arc<Mutex<Option<ConnGuard>>>>()
+                .cloned();
+            // Take the guard out of the holder so the connection task's
+            // final cleanup sees it already moved.
+            let guard = guard_holder.as_ref().and_then(|h| h.lock().ok().and_then(|mut g| g.take()));
             tokio::spawn(async move {
                 if let Err(e) = ws_handler::handle_ws_upgrade(
                     request,
@@ -146,6 +205,8 @@ impl Proxy for RemoteProxy {
                     no_base64,
                     max_frame,
                     txn_timeout,
+                    max_txn_bytes,
+                    guard,
                 )
                 .await
                 {

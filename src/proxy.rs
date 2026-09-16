@@ -52,22 +52,23 @@ impl ConnLimiter {
         }
         *count += 1;
         Some(ConnGuard {
-            limiter: self.clone(),
+            limiter: Some(self.clone()),
             ip: Some(ip),
         })
     }
 }
 
-/// Decrements the per-IP connection count on drop.
+/// Decrements the per-IP connection count on drop. A guard whose limiter was
+/// detached (or released) does nothing on drop.
 pub(crate) struct ConnGuard {
-    limiter: ConnLimiter,
+    limiter: Option<ConnLimiter>,
     ip: Option<IpAddr>,
 }
 
 impl Drop for ConnGuard {
     fn drop(&mut self) {
-        if let Some(ip) = self.ip.take() {
-            let mut map = self.limiter.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some(limiter), Some(ip)) = (self.limiter.as_ref(), self.ip.take()) {
+            let mut map = limiter.per_ip.lock().unwrap();
             if let Some(count) = map.get_mut(&ip) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
@@ -97,10 +98,10 @@ where
 
     fn listen_addr(&self) -> Result<SocketAddr>;
 
-    /// Per-client-IP concurrent connection cap for the listener. `None` or
-    /// `Some(0)` disables the limit. Override for deployments behind reverse
-    /// proxies (all clients share the proxy IP there — raise or disable).
-    fn max_conns_per_ip(&self) -> Option<usize> {
+    /// Shared per-client-IP connection limiter for the listener. `None`
+    /// disables the limit. Implementations build it once (in `new`) so every
+    /// accept path and the WebSocket upgrade path share one counter map.
+    fn conn_limiter(&self) -> Option<ConnLimiter> {
         None
     }
 
@@ -117,7 +118,7 @@ where
     async fn serve_http(self) -> Result<()> {
         let addr = self.listen_addr()?;
         let listener = TcpListener::bind(addr).await?;
-        let limiter = self.max_conns_per_ip().filter(|&n| n > 0).map(ConnLimiter::new);
+        let limiter = self.conn_limiter();
         info!("Listening on {}", addr);
 
         loop {
@@ -135,19 +136,33 @@ where
 
             let io = TokioIo::new(stream);
             let proxy = self.clone();
+            // Shared holder so the connection's per-IP slot can be transferred
+            // to the WS handler task on upgrade instead of double-counting.
+            let guard_holder = Arc::new(Mutex::new(guard));
+            let holder_in_handler = guard_holder.clone();
             tokio::spawn(async move {
-                let _guard = guard;
                 if let Err(err) = serve_builder()
                     .serve_connection_with_upgrades(
                         io,
-                        service_fn(|req| {
+                        service_fn(move |mut req| {
                             let proxy = proxy.clone();
-                            async move { proxy.handler(req, addr).await }
+                            let holder = holder_in_handler.clone();
+                            async move {
+                                // Share the connection's guard holder with
+                                // requests that may outlive the connection
+                                // (WS upgrade takes the guard out of it).
+                                req.extensions_mut().insert(holder);
+                                proxy.handler(req, addr).await
+                            }
                         }),
                     )
                     .await
                 {
                     warn!("Error serving connection: {:?}", err);
+                }
+                // Connection over: release the slot unless a WS task took it.
+                if let Ok(mut g) = guard_holder.lock() {
+                    g.take();
                 }
             });
         }
@@ -156,7 +171,7 @@ where
     async fn serve_tls(self, acceptor: TlsAcceptor) -> Result<()> {
         let addr = self.listen_addr()?;
         let listener = TcpListener::bind(addr).await?;
-        let limiter = self.max_conns_per_ip().filter(|&n| n > 0).map(ConnLimiter::new);
+        let limiter = self.conn_limiter();
         info!("Listening on {} (TLS)", addr);
 
         loop {
@@ -173,8 +188,9 @@ where
             };
             let proxy = self.clone();
             let acceptor = acceptor.clone();
+            let guard_holder = Arc::new(Mutex::new(guard));
+            let holder_in_handler = guard_holder.clone();
             tokio::spawn(async move {
-                let _guard = guard;
                 let tls_stream = match tokio::time::timeout(
                     TLS_HANDSHAKE_TIMEOUT,
                     acceptor.accept(stream),
@@ -184,10 +200,16 @@ where
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
                         warn!("TLS accept error from {addr}: {e:?}");
+                        if let Ok(mut g) = guard_holder.lock() {
+                            g.take();
+                        }
                         return;
                     }
                     Err(_) => {
                         warn!("TLS handshake timeout from {addr}");
+                        if let Ok(mut g) = guard_holder.lock() {
+                            g.take();
+                        }
                         return;
                     }
                 };
@@ -195,14 +217,22 @@ where
                 if let Err(err) = serve_builder()
                     .serve_connection_with_upgrades(
                         io,
-                        service_fn(|req| {
+                        service_fn(move |mut req| {
                             let proxy = proxy.clone();
-                            async move { proxy.handler(req, addr).await }
+                            let holder = holder_in_handler.clone();
+                            async move {
+                                req.extensions_mut().insert(holder);
+                                proxy.handler(req, addr).await
+                            }
                         }),
                     )
                     .await
                 {
                     warn!("Error serving connection: {:?}", err);
+                }
+                // Connection over: release the slot unless a WS task took it.
+                if let Ok(mut g) = guard_holder.lock() {
+                    g.take();
                 }
             });
         }

@@ -11,6 +11,11 @@ pub(crate) fn default_token() -> String {
     package_info()
 }
 
+/// Proof-of-key payload for the WebSocket handshake: the local client sends
+/// this constant encrypted with the shared token before the remote accepts
+/// any transaction frames on the connection (frame type 0x00).
+pub(crate) const WS_AUTH_PAYLOAD: &[u8] = b"rrproxy2-ws-auth";
+
 pub(crate) fn package_info() -> String {
     env!("CARGO_PKG_NAME").to_owned()
 }
