@@ -121,6 +121,14 @@ pub(crate) struct CommonOptions {
     /// (default: 1048576 = 1 MiB)
     #[arg(long)]
     pub(crate) max_frame: Option<usize>,
+
+    /// Source-address allowlist (whitelist): only connections from these
+    /// IPs/CIDRs are accepted; every other source is dropped immediately at
+    /// accept time, before any request is read or any task is spawned.
+    /// Comma-separated and/or repeated; bare addresses mean /32 (IPv4) or
+    /// /128 (IPv6). Omit to accept every source.
+    #[arg(long, num_args = 1.., value_delimiter = ',')]
+    pub(crate) allow_ips: Option<Vec<String>>,
 }
 
 // ── Local mode ────────────────────────────────────────────────────────────────
@@ -195,4 +203,18 @@ pub(crate) struct RemoteModeOptions {
     /// Enable TLS with a self-signed cert (no cert/key files needed).
     #[arg(long, action = ArgAction::SetTrue)]
     pub(crate) tls: Option<bool>,
+
+    /// Region allowlist: only requests whose client IP resolves to one of
+    /// these regions are served, everything else gets 403. Requires --geo-db.
+    /// Each rule is `country[|province[|city[|isp]]]`; fields may be empty or
+    /// `*` to match anything, and matching is case-insensitive substring
+    /// (so `浙江` matches `浙江省`). Country accepts an ISO code or name.
+    /// Comma-separated and/or repeated, e.g. `--allow-region "CN|浙江省|杭州市"`.
+    #[arg(long, num_args = 1.., value_delimiter = ',')]
+    pub(crate) allow_region: Option<Vec<String>>,
+
+    /// Path to an ip2region database (the IPv4 `ip2region_v4.xdb` file).
+    /// Required by --allow-region.
+    #[arg(long)]
+    pub(crate) geo_db: Option<PathBuf>,
 }

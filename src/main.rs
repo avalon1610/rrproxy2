@@ -88,6 +88,7 @@ async fn start<P: Proxy>(opts: P::Options) -> Result<()> {
 
 mod convert;
 mod crypto;
+mod geo;
 mod header;
 mod local;
 mod options;

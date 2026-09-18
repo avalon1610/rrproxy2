@@ -52,7 +52,13 @@ impl LocalProxy {
         Ok(response)
     }
 
-    async fn handle_tls(self, req: Request<Incoming>, cert: &str, key: &str, addr: SocketAddr) -> Result<()> {
+    async fn handle_tls(
+        self,
+        req: Request<Incoming>,
+        cert: &str,
+        key: &str,
+        addr: SocketAddr,
+    ) -> Result<()> {
         let upgraded = on(req).await?;
         let stream =
             downcast::<TokioIo<TcpStream>>(upgraded).map_err(|_| anyhow!("Failed to downcast"))?;

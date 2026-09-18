@@ -45,11 +45,7 @@ impl Transaction {
         if let Some(old) = self.cache.insert(chunk_index, body) {
             self.cached = self.cached.saturating_sub(old.len());
         }
-        self.cached += self
-            .cache
-            .get(&chunk_index)
-            .map(|c| c.len())
-            .unwrap_or(0);
+        self.cached += self.cache.get(&chunk_index).map(|c| c.len()).unwrap_or(0);
         // Refresh activity so a slow-but-legitimate large upload is not
         // evicted mid-flight by the stale-transaction sweep.
         self.start = Instant::now();

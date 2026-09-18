@@ -1,3 +1,7 @@
+use crate::{
+    crypto::{Cipher, WS_AUTH_PAYLOAD},
+    remote::MAX_TOTAL_CHUNKS,
+};
 use anyhow::{Result, anyhow};
 use base64ct::{Base64, Encoding};
 use bytes::{BufMut, BytesMut};
@@ -10,10 +14,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use crate::{
-    crypto::{Cipher, WS_AUTH_PAYLOAD},
-    remote::MAX_TOTAL_CHUNKS,
-};
 
 /// Upper bound on concurrently pending transactions per WebSocket connection.
 const MAX_PENDING_WS_TRANSACTIONS: usize = 256;
@@ -22,7 +22,10 @@ const MAX_WS_CONN_BYTES: usize = 256 * 1024 * 1024;
 use tokio::sync::Mutex;
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Message, protocol::{Role, WebSocketConfig}},
+    tungstenite::{
+        Message,
+        protocol::{Role, WebSocketConfig},
+    },
 };
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -145,10 +148,9 @@ pub(crate) async fn handle_ws_upgrade(
                         // Expire stale transactions so an attacker cannot grow the
                         // map forever by sending metadata frames that never complete.
                         if last_sweep.elapsed() >= transaction_timeout {
-                            transactions
-                                .retain(|_, (_, _, _, last_active, _)| {
-                                    last_active.elapsed() < transaction_timeout
-                                });
+                            transactions.retain(|_, (_, _, _, last_active, _)| {
+                                last_active.elapsed() < transaction_timeout
+                            });
                             // Recompute the connection total from what survived
                             // the sweep: retained transactions keep their bytes,
                             // evicted ones are dropped from the accounting too.
@@ -232,8 +234,7 @@ pub(crate) async fn handle_ws_upgrade(
                             *buffered = (*buffered as i64 + delta) as usize;
                             conn_buffered_bytes = (conn_buffered_bytes as i64 + delta) as usize;
                             *last_active = Instant::now();
-                            if *buffered > max_txn_bytes
-                                || conn_buffered_bytes > MAX_WS_CONN_BYTES
+                            if *buffered > max_txn_bytes || conn_buffered_bytes > MAX_WS_CONN_BYTES
                             {
                                 warn!(
                                     "[{}] WS byte budget exceeded (txn or connection), dropping",
@@ -370,7 +371,10 @@ async fn forward_request(
     let mut builder = client.request(method.parse()?, path);
     let mut forwarded_headers: Vec<(String, String)> = Vec::new();
     for h in req.headers.iter() {
-        if !STRIP_HEADERS.iter().any(|&name| name.eq_ignore_ascii_case(h.name)) {
+        if !STRIP_HEADERS
+            .iter()
+            .any(|&name| name.eq_ignore_ascii_case(h.name))
+        {
             builder = builder.header(h.name, h.value);
             forwarded_headers.push((
                 h.name.to_string(),

@@ -26,7 +26,10 @@ use tokio::{
     task::JoinHandle,
     time::sleep,
 };
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::Message, tungstenite::protocol::WebSocketConfig};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::Message,
+    tungstenite::protocol::WebSocketConfig,
+};
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
@@ -49,11 +52,7 @@ pub(crate) struct WsConnectionManager {
 }
 
 impl WsConnectionManager {
-    pub(crate) async fn new(
-        remote_addr: &str,
-        proxy: Option<&str>,
-        token: String,
-    ) -> Result<Self> {
+    pub(crate) async fn new(remote_addr: &str, proxy: Option<&str>, token: String) -> Result<Self> {
         let (reconnect_tx, reconnect_rx) = mpsc::channel(1);
 
         let remote_addr = remote_addr.to_string();
@@ -199,9 +198,13 @@ impl WsConnectionManager {
                 let mut cfg = WebSocketConfig::default();
                 cfg.max_message_size = None;
                 cfg.max_frame_size = None;
-                let (ws, _) = tokio_tungstenite::client_async_with_config(ws_url.clone(), maybe_tls, Some(cfg))
-                    .await
-                    .context("connect websocket directly error")?;
+                let (ws, _) = tokio_tungstenite::client_async_with_config(
+                    ws_url.clone(),
+                    maybe_tls,
+                    Some(cfg),
+                )
+                .await
+                .context("connect websocket directly error")?;
                 ws
             } else {
                 let mut cfg = WebSocketConfig::default();
@@ -308,9 +311,10 @@ impl WsConnectionManager {
             let mut cfg = WebSocketConfig::default();
             cfg.max_message_size = None;
             cfg.max_frame_size = None;
-            let (ws, resp) = tokio_tungstenite::client_async_with_config(ws_url, maybe_tls, Some(cfg))
-                .await
-                .context("websocket tls connect error")?;
+            let (ws, resp) =
+                tokio_tungstenite::client_async_with_config(ws_url, maybe_tls, Some(cfg))
+                    .await
+                    .context("websocket tls connect error")?;
             debug!("WebSocket handshake response status: {:?}", resp.status());
             Ok(ws)
         } else {
@@ -320,9 +324,10 @@ impl WsConnectionManager {
             let mut cfg = WebSocketConfig::default();
             cfg.max_message_size = None;
             cfg.max_frame_size = None;
-            let (ws, resp) = tokio_tungstenite::client_async_with_config(ws_url, maybe_tls, Some(cfg))
-                .await
-                .context("websocket connect error")?;
+            let (ws, resp) =
+                tokio_tungstenite::client_async_with_config(ws_url, maybe_tls, Some(cfg))
+                    .await
+                    .context("websocket connect error")?;
             debug!("WebSocket handshake response status: {:?}", resp.status());
             Ok(ws)
         }
@@ -430,29 +435,28 @@ impl WsConnectionManager {
 
             for attempt in 1..=MAX_RETRIES {
                 // Returns Ok(reader) when the connection is up and authenticated.
-                let connected: Result<WsReader> = match Self::connect(&remote_addr, proxy.as_deref())
-                    .await
-                {
-                    Ok(ws) => {
-                        let (new_sink, mut reader) = ws.split();
-                        // Replace the sink
-                        *sink.lock().await = new_sink;
+                let connected: Result<WsReader> =
+                    match Self::connect(&remote_addr, proxy.as_deref()).await {
+                        Ok(ws) => {
+                            let (new_sink, mut reader) = ws.split();
+                            // Replace the sink
+                            *sink.lock().await = new_sink;
 
-                        // Re-authenticate the fresh connection before any
-                        // transaction frames can be sent over it.
-                        match Self::send_auth(&sink, &mut reader, &cipher).await {
-                            Ok(()) => Ok(reader),
-                            Err(e) => {
-                                warn!("WebSocket auth after reconnect failed: {e}");
-                                Err(e)
+                            // Re-authenticate the fresh connection before any
+                            // transaction frames can be sent over it.
+                            match Self::send_auth(&sink, &mut reader, &cipher).await {
+                                Ok(()) => Ok(reader),
+                                Err(e) => {
+                                    warn!("WebSocket auth after reconnect failed: {e}");
+                                    Err(e)
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("Reconnection attempt {} failed: {}", attempt, e);
-                        Err(anyhow!("connect failed: {e}"))
-                    }
-                };
+                        Err(e) => {
+                            warn!("Reconnection attempt {} failed: {}", attempt, e);
+                            Err(anyhow!("connect failed: {e}"))
+                        }
+                    };
 
                 if let Ok(new_reader) = connected {
                     // Abort the stale ping task and spawn a fresh one

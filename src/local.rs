@@ -11,7 +11,7 @@ use crate::{
         DEFAULT_CA_COMMON_NAME, DEFAULT_CACHE_DIR, DEFAULT_CERT, DEFAULT_CHUNK, DEFAULT_KEY,
         DEFAULT_LISTEN, DEFAULT_REMOTE, LocalModeOptions,
     },
-    proxy::Proxy,
+    proxy::{IpWhitelist, Proxy},
 };
 use anyhow::{Context, Result, bail};
 use http_body_util::{BodyExt, Full};
@@ -36,6 +36,8 @@ pub(crate) struct LocalProxy {
     proxy_client: Option<reqwest::Client>,
     direct_client: reqwest::Client,
     ws_manager: Option<Arc<WsConnectionManager>>,
+    /// Source-address allowlist for the listener; `None` accepts every peer.
+    ip_whitelist: Option<IpWhitelist>,
 }
 
 impl Proxy for LocalProxy {
@@ -92,6 +94,13 @@ impl Proxy for LocalProxy {
             None
         };
 
+        let ip_whitelist = opts
+            .common
+            .allow_ips
+            .as_deref()
+            .map(IpWhitelist::parse)
+            .transpose()?;
+
         Ok(Self {
             cm: Arc::new(cm),
             bypass,
@@ -99,6 +108,7 @@ impl Proxy for LocalProxy {
             proxy_client,
             direct_client,
             ws_manager,
+            ip_whitelist,
         })
     }
 
@@ -139,6 +149,10 @@ impl Proxy for LocalProxy {
             .as_deref()
             .unwrap_or(DEFAULT_LISTEN)
             .parse()?)
+    }
+
+    fn ip_whitelist(&self) -> Option<IpWhitelist> {
+        self.ip_whitelist.clone()
     }
 }
 

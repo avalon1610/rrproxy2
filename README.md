@@ -162,8 +162,95 @@ OPTIONS:
   -t, --token <TOKEN>     Encryption token
   -p, --proxy <URL>       Intermediate proxy URL (optional)
   -g, --generate-token    Generate a new UUID token
+      --allow-ips <LIST>  Source-address allowlist (IP/CIDR, comma-separated)
+      --allow-region <LIST>   Region allowlist (requires --geo-db)
+      --geo-db <PATH>         ip2region IPv4 database for --allow-region
   -v, --verbose          Increase verbosity (-v debug, -vv trace)
 ```
+
+##### Source-address allowlist (`--allow-ips`)
+
+Restricts which peers may connect at all. Any connection whose source address
+is not covered is **dropped immediately at accept time** — before a task is
+spawned and before any buffer is allocated — so rejected peers cost no memory
+and no CPU beyond the accept itself.
+
+```bash
+# Only these networks may connect; everything else is dropped.
+rrproxy2 remote -l 0.0.0.0:8081 --token my-secret \
+  --allow-ips 47.96.0.0/16,118.31.0.0/16
+
+# Bare addresses mean a single host (/32 or /128). Entries may also be
+# repeated, and the option accepts space-separated values:
+rrproxy2 remote --allow-ips 203.0.113.7 --allow-ips 2001:db8::/32
+```
+
+Omit the option to accept every source (default). A malformed entry makes
+startup fail rather than silently widening the list.
+
+In the config file, use the same name as an array:
+
+```toml
+[remote]
+listen = "0.0.0.0:8081"
+token = "my-secret"
+allow_ips = ["47.96.0.0/16", "118.31.0.0/16"]
+```
+
+The allowlist matches the *TCP peer address*: connect local proxies directly
+to this listener's address.
+
+##### Region allowlist (`--allow-region` + `--geo-db`)
+
+Restricts which **clients** may use the remote proxy, based on the client's
+geographic region. The region is resolved offline from an
+[ip2region](https://github.com/lionsoul2014/ip2region) database — no online
+lookup, no third-party API, no per-request network call.
+
+```bash
+# Only clients geolocating to Hangzhou, Zhejiang, China are served.
+rrproxy2 remote -l 0.0.0.0:8081 --token my-secret \
+  --allow-region "CN|浙江省|杭州市" \
+  --geo-db /etc/rrproxy2/ip2region_v4.xdb
+```
+
+Rule syntax is `country[|province[|city[|isp]]]`, `|`-separated; trailing
+fields may be omitted, and a field may be `*` or empty to match anything:
+
+| Rule | Matches |
+|---|---|
+| `CN` | any Chinese address (ISO code or country name) |
+| `CN|浙江省` | Zhejiang province |
+| `CN|浙江省|杭州市` | Hangzhou city |
+| `CN|*|杭州市` | Hangzhou regardless of the province field |
+
+Matching is case-insensitive **substring** per field, so `浙江` matches the
+database's `浙江省` and `杭州` matches `杭州市`. Multiple rules may be
+comma-separated or repeated; a connection is accepted if **any** rule matches.
+
+The check runs at **accept time** on the TCP peer address alone — before a
+task is spawned, before the TLS handshake, and before any request data is
+read. Connections from addresses outside the configured regions are dropped
+immediately, so they cost no memory, no CPU and no log noise. Request
+forwarding headers (e.g. `CF-Connecting-IP`) are never consulted: the decision
+is made purely from where the connection originates. An address that cannot be
+resolved (e.g. an IPv6 peer, or one absent from the database) is dropped.
+
+Download the database (about 11 MB, updated by the upstream project):
+
+```bash
+curl -sSLo ip2region_v4.xdb \
+  https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ip2region_v4.xdb
+```
+
+The database is read with positioned reads and only the 512 KiB vector index is
+kept in memory, so enabling region filtering does not inflate the resident set.
+Refresh it periodically (e.g. a monthly cron plus a service restart).
+
+> **Behind a front proxy:** the region of the *proxy's* address is what gets
+> checked, since the connection originates there. Connect clients (or your
+> local proxies) directly to this listener's address if you need their true
+> source region evaluated.
 
 #### Local Proxy Options
 
@@ -181,6 +268,7 @@ OPTIONS:
       --generate-ca             Generate new CA certificate and key
       --ca-common-name <NAME>   CA common name (default: "RRProxy Root CA")
       --cache-dir <PATH>        Certificate cache directory (default: cert_cache)
+      --allow-ips <LIST>        Source-address allowlist (IP/CIDR, comma-separated)
   -v, --verbose                Increase verbosity (-v debug, -vv trace)
 ```
 

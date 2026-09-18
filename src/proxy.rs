@@ -1,4 +1,5 @@
-use anyhow::Result;
+use crate::geo::SharedGeoCheck;
+use anyhow::{Result, anyhow, bail};
 use http_body_util::Full;
 use hyper::{
     Request, Response,
@@ -9,11 +10,13 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
     server::conn::auto::Builder,
 };
+use ipnetwork::IpNetwork;
 use std::{
     collections::HashMap,
     convert::Infallible,
     future::Future,
     net::{IpAddr, SocketAddr},
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -79,6 +82,50 @@ impl Drop for ConnGuard {
     }
 }
 
+/// Parsed source-address allowlist (`--allow-ips`). When configured, any
+/// connection whose peer address is not covered is dropped at accept time —
+/// before the connection limiter is touched, before a task is spawned and
+/// before any buffer is allocated, so rejected peers cost no per-connection
+/// memory.
+#[derive(Debug, Clone)]
+pub(crate) struct IpWhitelist {
+    networks: Vec<IpNetwork>,
+}
+
+impl IpWhitelist {
+    /// Parse `--allow-ips` entries. Each entry is an IP or CIDR; a bare
+    /// address means a single host (`/32` for IPv4, `/128` for IPv6).
+    pub(crate) fn parse(entries: &[String]) -> Result<Self> {
+        let mut networks = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            // ipnetwork parses "10.0.0.1/8" and "10.0.0.1"; keep the explicit
+            // prefix when present so a mistyped CIDR is not silently widened.
+            let network = IpNetwork::from_str(entry)
+                .map_err(|e| anyhow!("invalid --allow-ips entry {entry:?}: {e}"))?;
+            networks.push(network);
+        }
+        if networks.is_empty() {
+            bail!("--allow-ips was given but contains no usable IP or CIDR entries");
+        }
+        Ok(Self { networks })
+    }
+
+    /// True if `ip` is covered by any entry. IPv4-mapped IPv6 peers
+    /// (`::ffff:a.b.c.d`, as produced by dual-stack listeners) are compared
+    /// as IPv4 so an IPv4 rule matches them.
+    pub(crate) fn allows(&self, ip: IpAddr) -> bool {
+        let ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+            v4 => v4,
+        };
+        self.networks.iter().any(|n| n.contains(ip))
+    }
+}
+
 fn serve_builder() -> Builder<TokioExecutor> {
     let mut builder = Builder::new(TokioExecutor::new());
     builder
@@ -105,6 +152,19 @@ where
         None
     }
 
+    /// Optional source-address allowlist for the listener. `None` accepts
+    /// every source; `Some` drops every peer it does not cover at accept time.
+    fn ip_whitelist(&self) -> Option<IpWhitelist> {
+        None
+    }
+
+    /// Optional region allowlist for the listener. `None` accepts every
+    /// source; `Some` drops every peer whose address falls outside the
+    /// configured regions at accept time.
+    fn geo_check(&self) -> Option<SharedGeoCheck> {
+        None
+    }
+
     fn handler(
         self,
         request: Request<Incoming>,
@@ -119,10 +179,42 @@ where
         let addr = self.listen_addr()?;
         let listener = TcpListener::bind(addr).await?;
         let limiter = self.conn_limiter();
+        let whitelist = self.ip_whitelist();
+        let geo = self.geo_check();
         info!("Listening on {}", addr);
 
         loop {
             let (stream, addr) = listener.accept().await?;
+            // Allowlist first: a rejected peer is dropped here, so it never
+            // consumes a limiter slot, a task or any connection buffers.
+            if let Some(whitelist) = whitelist.as_ref()
+                && !whitelist.allows(addr.ip())
+            {
+                debug!(
+                    "dropping connection from {} (not in --allow-ips)",
+                    addr.ip()
+                );
+                continue;
+            }
+            // Region allowlist: same accept-time drop, decided from the TCP
+            // peer address only.
+            if let Some(geo) = geo.as_ref() {
+                match geo.allows(addr.ip()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        debug!(
+                            "dropping connection from {} (outside --allow-region)",
+                            addr.ip()
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        // Fail closed, but keep the reason visible.
+                        warn!("geo lookup failed for {}: {e:#}; dropping", addr.ip());
+                        continue;
+                    }
+                }
+            }
             let guard = match limiter.as_ref() {
                 Some(l) => match l.acquire(addr) {
                     Some(g) => Some(g),
@@ -172,10 +264,42 @@ where
         let addr = self.listen_addr()?;
         let listener = TcpListener::bind(addr).await?;
         let limiter = self.conn_limiter();
+        let whitelist = self.ip_whitelist();
+        let geo = self.geo_check();
         info!("Listening on {} (TLS)", addr);
 
         loop {
             let (stream, addr) = listener.accept().await?;
+            // Reject before the TLS handshake: a non-whitelisted peer never
+            // gets a rustls session, a limiter slot or a task.
+            if let Some(whitelist) = whitelist.as_ref()
+                && !whitelist.allows(addr.ip())
+            {
+                debug!(
+                    "dropping connection from {} (not in --allow-ips)",
+                    addr.ip()
+                );
+                continue;
+            }
+            // Region allowlist: same accept-time drop, before the TLS
+            // handshake, decided from the TCP peer address only.
+            if let Some(geo) = geo.as_ref() {
+                match geo.allows(addr.ip()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        debug!(
+                            "dropping connection from {} (outside --allow-region)",
+                            addr.ip()
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        // Fail closed, but keep the reason visible.
+                        warn!("geo lookup failed for {}: {e:#}; dropping", addr.ip());
+                        continue;
+                    }
+                }
+            }
             let guard = match limiter.as_ref() {
                 Some(l) => match l.acquire(addr) {
                     Some(g) => Some(g),
@@ -249,3 +373,95 @@ pub(crate) const TRANSACTION_ID_HEADER: &str = "X-Request-Id";
 pub(crate) const ORIGINAL_URL_HEADER: &str = "X-Referer";
 pub(crate) const TOTAL_CHUNKS_HEADER: &str = "X-Robots-Tag";
 pub(crate) const CONTENT_TYPE_HEADER: &str = "X-Content-Type";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn wl(entries: &[&str]) -> IpWhitelist {
+        let entries: Vec<String> = entries.iter().map(|s| s.to_string()).collect();
+        IpWhitelist::parse(&entries).expect("whitelist should parse")
+    }
+
+    #[test]
+    fn allows_single_bare_address() {
+        let w = wl(&["10.1.2.3"]);
+        assert!(w.allows(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
+        assert!(!w.allows(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 4))));
+    }
+
+    #[test]
+    fn allows_cidr_range() {
+        let w = wl(&["10.0.0.0/8"]);
+        assert!(w.allows(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1))));
+        assert!(!w.allows(IpAddr::V4(Ipv4Addr::new(11, 0, 0, 1))));
+    }
+
+    #[test]
+    fn allows_multiple_mixed_entries() {
+        let w = wl(&["192.168.1.0/24", "203.0.113.7", "2001:db8::/32"]);
+        assert!(w.allows(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200))));
+        assert!(w.allows(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))));
+        assert!(w.allows(IpAddr::V6("2001:db8::1".parse().unwrap())));
+        assert!(!w.allows(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn ipv4_mapped_v6_peer_matches_ipv4_rule() {
+        // Dual-stack listeners report `::ffff:10.0.0.5`; the IPv4 rule must match.
+        let w = wl(&["10.0.0.0/24"]);
+        let mapped = IpAddr::V6(Ipv4Addr::new(10, 0, 0, 5).to_ipv6_mapped());
+        assert!(w.allows(mapped));
+    }
+
+    #[test]
+    fn blank_entries_are_skipped() {
+        let w = wl(&["", "  ", "10.0.0.1"]);
+        assert!(w.allows(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    }
+
+    #[test]
+    fn invalid_entry_is_rejected() {
+        let entries = vec!["not-an-ip".to_string()];
+        assert!(IpWhitelist::parse(&entries).is_err());
+    }
+
+    #[test]
+    fn only_blank_entries_is_rejected() {
+        // A configured-but-empty list must not silently become "allow all".
+        let entries = vec!["".to_string(), " ".to_string()];
+        assert!(IpWhitelist::parse(&entries).is_err());
+    }
+
+    #[test]
+    fn default_proxy_has_no_whitelist() {
+        // Trait default: a Proxy that does not override ip_whitelist accepts
+        // every source — the default must be None, not deny-all.
+        #[derive(Clone)]
+        struct StubProxy;
+
+        impl Proxy for StubProxy {
+            type Options = ();
+
+            async fn new(_opts: ()) -> Result<Self> {
+                Ok(Self)
+            }
+
+            fn listen_addr(&self) -> Result<SocketAddr> {
+                "127.0.0.1:0".parse().map_err(Into::into)
+            }
+
+            fn handler(
+                self,
+                _request: Request<Incoming>,
+                _addr: SocketAddr,
+            ) -> impl Future<Output = Result<Response<Full<Bytes>>, Infallible>> + Send
+            {
+                async { unreachable!("stub proxy never serves requests") }
+            }
+        }
+
+        assert!(StubProxy.ip_whitelist().is_none());
+    }
+}

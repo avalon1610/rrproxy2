@@ -1,15 +1,16 @@
 use crate::{
     convert::{Encryptor, ResponseConverter},
     crypto::{Cipher, default_token},
+    geo::{GeoCheck, SharedGeoCheck},
     options::{DEFAULT_LISTEN, RemoteModeOptions},
-    proxy::{COMMIT_INDEX_HEADER, ConnGuard, ConnLimiter, Proxy},
+    proxy::{COMMIT_INDEX_HEADER, ConnGuard, ConnLimiter, IpWhitelist, Proxy},
     remote::{
         info::Info,
         transaction::{Transaction, TransactionState},
     },
 };
-use base64ct::{Base64, Encoding};
 use anyhow::{Context, Result, anyhow, bail};
+use base64ct::{Base64, Encoding};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, Uri,
@@ -67,6 +68,12 @@ pub(crate) struct RemoteProxy {
     /// Shared per-IP connection limiter; `None` disables the cap. Built once
     /// so the accept loops and WS upgrades share one counter map.
     conn_limiter: Option<ConnLimiter>,
+    /// Source-address allowlist; `None` accepts every peer. Parsed once at
+    /// startup so a bad entry fails fast instead of dropping all traffic.
+    ip_whitelist: Option<IpWhitelist>,
+    /// Optional region allowlist backed by an offline ip2region database.
+    /// `None` disables region filtering.
+    geo_check: Option<SharedGeoCheck>,
 }
 
 impl Proxy for RemoteProxy {
@@ -86,34 +93,28 @@ impl Proxy for RemoteProxy {
         let token = opts.common.token.clone().unwrap_or_else(default_token);
         let no_base64 = opts.common.no_base64.unwrap_or(false);
 
-        if let Some(frame) = opts.common.max_frame {
-            if frame == 0 {
-                bail!("--max-frame must be greater than 0");
-            }
+        if let Some(frame) = opts.common.max_frame
+            && frame == 0
+        {
+            bail!("--max-frame must be greater than 0");
         }
-        let max_frame_size = opts
-            .common
-            .max_frame
-            .unwrap_or(DEFAULT_MAX_FRAME_SIZE);
+        let max_frame_size = opts.common.max_frame.unwrap_or(DEFAULT_MAX_FRAME_SIZE);
 
-        if let Some(max_body) = opts.common.max_body {
-            if max_body == 0 {
-                bail!("--max-body must be greater than 0");
-            }
+        if let Some(max_body) = opts.common.max_body
+            && max_body == 0
+        {
+            bail!("--max-body must be greater than 0");
         }
         let max_body = opts.common.max_body.unwrap_or(MAX_BODY_SIZE);
         // Historical WS per-txn cap is 64 MiB; an explicit --max-body lowers
         // it (a reassembled WS request is already bounded by the same limit
         // in HTTP mode). Omitting --max-body keeps the default.
-        let max_ws_txn_bytes = opts
-            .common
-            .max_body
-            .unwrap_or(MAX_WS_TRANSACTION_BYTES);
+        let max_ws_txn_bytes = opts.common.max_body.unwrap_or(MAX_WS_TRANSACTION_BYTES);
 
-        if let Some(secs) = opts.common.transaction_timeout {
-            if secs == 0 {
-                bail!("--transaction-timeout must be greater than 0");
-            }
+        if let Some(secs) = opts.common.transaction_timeout
+            && secs == 0
+        {
+            bail!("--transaction-timeout must be greater than 0");
         }
         let transaction_timeout = Duration::from_secs(
             opts.common
@@ -133,6 +134,22 @@ impl Proxy for RemoteProxy {
             .filter(|&n| n > 0)
             .map(ConnLimiter::new);
 
+        let ip_whitelist = opts
+            .common
+            .allow_ips
+            .as_deref()
+            .map(IpWhitelist::parse)
+            .transpose()?;
+
+        // Region filtering needs both a rule list and a database; requiring
+        // the pair up front avoids a listener that silently admits everything.
+        let geo_check = match (&opts.allow_region, &opts.geo_db) {
+            (Some(rules), Some(db_path)) => Some(Arc::new(GeoCheck::new(db_path, rules)?)),
+            (Some(_), None) => bail!("--allow-region requires --geo-db <path to ip2region_v4.xdb>"),
+            (None, Some(_)) => bail!("--geo-db requires --allow-region"),
+            (None, None) => None,
+        };
+
         Ok(Self {
             transactions: Arc::new(Mutex::new(HashMap::new())),
             cipher: Arc::new(Cipher::new(token)),
@@ -144,6 +161,8 @@ impl Proxy for RemoteProxy {
             max_ws_txn_bytes,
             transaction_timeout,
             conn_limiter,
+            ip_whitelist,
+            geo_check,
         })
     }
 
@@ -161,12 +180,23 @@ impl Proxy for RemoteProxy {
         self.conn_limiter.clone()
     }
 
+    fn ip_whitelist(&self) -> Option<IpWhitelist> {
+        self.ip_whitelist.clone()
+    }
+
+    fn geo_check(&self) -> Option<SharedGeoCheck> {
+        self.geo_check.clone()
+    }
+
     async fn handler(
         self,
         request: Request<Incoming>,
         addr: SocketAddr,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
         info!("local request from {}", addr);
+
+        // Region allowlisting happens at accept() time (see the Proxy serve
+        // loops); the handler never sees a connection that was not admitted.
 
         if self.opts.common.websocket.unwrap_or(false) && is_ws_upgrade(&request) {
             let (cipher, client) = (self.cipher.clone(), self.client.clone());
@@ -196,7 +226,9 @@ impl Proxy for RemoteProxy {
                 .cloned();
             // Take the guard out of the holder so the connection task's
             // final cleanup sees it already moved.
-            let guard = guard_holder.as_ref().and_then(|h| h.lock().ok().and_then(|mut g| g.take()));
+            let guard = guard_holder
+                .as_ref()
+                .and_then(|h| h.lock().ok().and_then(|mut g| g.take()));
             tokio::spawn(async move {
                 if let Err(e) = ws_handler::handle_ws_upgrade(
                     request,
@@ -272,7 +304,10 @@ impl RemoteProxy {
         {
             anyhow::bail!("request body too large");
         }
-        let body = match http_body_util::Limited::new(body, self.max_body).collect().await {
+        let body = match http_body_util::Limited::new(body, self.max_body)
+            .collect()
+            .await
+        {
             Ok(collected) => collected.to_bytes(),
             Err(_) => anyhow::bail!("request body too large"),
         };
